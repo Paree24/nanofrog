@@ -115,8 +115,9 @@ jobs:
           done
           ls *.zip
           # Evergreen "auto" tag: replace the previous auto release.
-          gh release delete auto --cleanup-tag --yes 2>/dev/null || true
-          git push origin :refs/tags/auto 2>/dev/null || true
+          # (No checkout in this job, so --repo is required on every call.)
+          gh release delete auto --repo "${{ github.repository }}" \
+            --cleanup-tag --yes 2>/dev/null || true
           gh release create auto --repo "${{ github.repository }}" \
             --title "Auto build" \
             --notes "Automated CI build from ${{ github.sha }}. Personal project, provided as-is without warranty." \
