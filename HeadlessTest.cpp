@@ -22,6 +22,7 @@ static bool rectInside (juce::Rectangle<int> inner, juce::Rectangle<int> outer)
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
+    setvbuf (stdout, nullptr, _IONBF, 0); // unbuffered: CI logs survive crashes
     printf ("-- NanoFrog headless test --\n");
 
     // Point the bank at the repo JSON and user presets at a temp dir.
@@ -41,11 +42,11 @@ int main()
 #endif
     }
 
-    NanoFrogProcessor proc;
-    proc.prepareToPlay (44100.0, 512);
+    auto proc = std::make_unique<NanoFrogProcessor>();
+    proc->prepareToPlay (44100.0, 512);
 
     // ---- program count ----
-    int nProg = proc.getNumPrograms();
+    int nProg = proc->getNumPrograms();
     CHECK (nProg == 401, "program count %d, expected 401", nProg);
     printf ("programs: %d\n", nProg);
     CHECK (PresetBank::get (0).name == "Init",
@@ -56,7 +57,7 @@ int main()
            PresetBank::get (1).name.toRawUTF8());
 
     // ---- editor layout ----
-    NanoFrogEditor* outer = dynamic_cast<NanoFrogEditor*> (proc.createEditor());
+    NanoFrogEditor* outer = dynamic_cast<NanoFrogEditor*> (proc->createEditor());
     CHECK (outer != nullptr, "editor is null");
     if (outer == nullptr) return 1;
     FrogContent& edref = outer->getContent();
@@ -144,13 +145,13 @@ int main()
     }
 
     // ---- parameter shape checks ----
-    if (auto* dg = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter ("osc1_digital")))
+    if (auto* dg = dynamic_cast<juce::AudioParameterChoice*> (proc->apvts.getParameter ("osc1_digital")))
         CHECK (dg->choices.size() == 192, "osc1_digital choices %d, expected 192", dg->choices.size());
     else { CHECK (false, "osc1_digital is not a choice"); }
-    if (auto* ow = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter ("osc1_wave")))
+    if (auto* ow = dynamic_cast<juce::AudioParameterChoice*> (proc->apvts.getParameter ("osc1_wave")))
         CHECK (ow->choices.size() == 7, "osc1_wave choices %d, expected 7", ow->choices.size());
     else { CHECK (false, "osc1_wave is not a choice"); }
-    if (auto* ls = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter ("lfo1_sync")))
+    if (auto* ls = dynamic_cast<juce::AudioParameterChoice*> (proc->apvts.getParameter ("lfo1_sync")))
         CHECK (ls->choices.size() == 16, "lfo1_sync choices %d, expected 16", ls->choices.size());
     else { CHECK (false, "lfo1_sync is not a choice"); }
 
@@ -170,19 +171,19 @@ int main()
         CHECK (std::abs (mean) < 1e-4f, "user cycle mean %.6f, want ~0", mean);
         CHECK (std::abs (cyc[0] - cyc[NanoFrogProcessor::kUserLen - 1]) < 1e-6f,
                "user cycle seam not closed");
-        CHECK (proc.importUserWave (src, 4096, "TestSine"), "importUserWave failed");
-        CHECK (proc.hasUserWave(), "user wave not flagged loaded");
-        CHECK (proc.getUserWaveName() == "TestSine", "user wave name not stored");
+        CHECK (proc->importUserWave (src, 4096, "TestSine"), "importUserWave failed");
+        CHECK (proc->hasUserWave(), "user wave not flagged loaded");
+        CHECK (proc->getUserWaveName() == "TestSine", "user wave name not stored");
     }
 
     // ---- preset round-trip (epsilon, LESSONS.md #21) ----
     for (const char* pid : { "osc1_octave", "mod1_src", "filter_type", "bogus_id" })
-        printf ("  lookup %-12s -> %s\n", pid, proc.apvts.getParameter (pid) ? "found" : "NULL");
+        printf ("  lookup %-12s -> %s\n", pid, proc->apvts.getParameter (pid) ? "found" : "NULL");
     // Direct-conversion probe (no async, no editor involvement).
-    if (auto* p = proc.apvts.getParameter ("mix_o1"))
+    if (auto* p = proc->apvts.getParameter ("mix_o1"))
     {
         p->setValueNotifyingHost (p->convertTo0to1 (0.7874f));
-        float raw = proc.apvts.getRawParameterValue ("mix_o1")->load();
+        float raw = proc->apvts.getRawParameterValue ("mix_o1")->load();
         printf ("  direct probe mix_o1: raw=%.6f norm=%.6f (want raw 0.787400)\n",
                 raw, p->getValue());
     }
@@ -342,14 +343,14 @@ int main()
     };
     auto checkPreset = [&] (int idx) -> int
     {
-        CHECK (proc.getCurrentProgram() == idx, "current program %d after set %d",
-               proc.getCurrentProgram(), idx);
+        CHECK (proc->getCurrentProgram() == idx, "current program %d after set %d",
+               proc->getCurrentProgram(), idx);
         const auto& pr = PresetBank::get (idx);
         int mism = 0;
         for (int k = 0; k < 152; ++k)
         {
             float actual = 0.0f;
-            if (auto* pv = proc.apvts.getRawParameterValue (kIds[k])) actual = pv->load();
+            if (auto* pv = proc->apvts.getRawParameterValue (kIds[k])) actual = pv->load();
             if (std::abs (actual - pr.values[k]) > 1e-3f)
             {
                 if (mism < 5)
@@ -371,12 +372,12 @@ int main()
         {
             const auto& pr = PresetBank::get (idx);
             for (int k = 0; k < 152; ++k)
-                if (auto* p = proc.apvts.getParameter (kIds[k]))
+                if (auto* p = proc->apvts.getParameter (kIds[k]))
                     p->setValueNotifyingHost (p->convertTo0to1 (pr.values[k]));
             for (int k = 0; k < 152; ++k)
             {
                 float actual = 0.0f;
-                if (auto* pv = proc.apvts.getRawParameterValue (kIds[k])) actual = pv->load();
+                if (auto* pv = proc->apvts.getRawParameterValue (kIds[k])) actual = pv->load();
                 if (std::abs (actual - pr.values[k]) > 1e-3f && bad < 5)
                     printf ("  bank mismatch preset %d param %s: got %.4f want %.4f\n",
                             idx, kIds[k], actual, pr.values[k]);
@@ -419,16 +420,16 @@ int main()
     // ---- user preset save/load/delete + state persistence ----
     {
         juce::File savedFile = PresetBank::saveUser ("Test Wobble", { "User", "Bass" },
-                                                       PresetBank::capture (proc.apvts));
+                                                       PresetBank::capture (proc->apvts));
         CHECK (savedFile.existsAsFile(), "saveUser failed");
         auto users = PresetBank::scanUser();
         CHECK (users.size() == 1, "scanUser found %d, expected 1", (int) users.size());
         // change state, then load the user preset and confirm values return
-        if (auto* p = proc.apvts.getParameter ("filter_cutoff"))
+        if (auto* p = proc->apvts.getParameter ("filter_cutoff"))
             p->setValueNotifyingHost (0.0f);
-        CHECK (proc.loadUserPreset (users[0].file), "loadUserPreset failed");
-        CHECK (proc.getCurrentProgram() == -1, "user load did not enter user mode");
-        CHECK (proc.getCurrentUserPreset() == users[0].file.getFileName(),
+        CHECK (proc->loadUserPreset (users[0].file), "loadUserPreset failed");
+        CHECK (proc->getCurrentProgram() == -1, "user load did not enter user mode");
+        CHECK (proc->getCurrentUserPreset() == users[0].file.getFileName(),
                "user name not tracked");
         ed->openBrowser();
         CHECK (ed->getBrowser()->getRowCount() == nProg + 1,
@@ -436,15 +437,15 @@ int main()
         ed->closeBrowser();
         // state round-trips the user mode (message thread: applied immediately)
         juce::MemoryBlock blob;
-        proc.getStateInformation (blob);
-        NanoFrogProcessor proc3;
-        proc3.setStateInformation (blob.getData(), (int) blob.getSize());
-        CHECK (proc3.getCurrentProgram() == -1, "restored proc not in user mode");
-        CHECK (proc3.getCurrentUserPreset() == users[0].file.getFileName(),
+        proc->getStateInformation (blob);
+        auto proc3 = std::make_unique<NanoFrogProcessor>();
+        proc3->setStateInformation (blob.getData(), (int) blob.getSize());
+        CHECK (proc3->getCurrentProgram() == -1, "restored proc not in user mode");
+        CHECK (proc3->getCurrentUserPreset() == users[0].file.getFileName(),
                "restored user name mismatch");
         float a = 0.0f, b = 0.0f;
-        if (auto* pv = proc.apvts.getRawParameterValue ("filter_cutoff")) a = pv->load();
-        if (auto* pv = proc3.apvts.getRawParameterValue ("filter_cutoff")) b = pv->load();
+        if (auto* pv = proc->apvts.getRawParameterValue ("filter_cutoff")) a = pv->load();
+        if (auto* pv = proc3->apvts.getRawParameterValue ("filter_cutoff")) b = pv->load();
         CHECK (std::abs (a - b) < 1e-6f, "user state values diverged");
         CHECK (PresetBank::deleteUser (users[0].file), "deleteUser failed");
         CHECK (PresetBank::scanUser().empty(), "user preset not deleted");
@@ -458,7 +459,7 @@ int main()
         {
             juce::File f = PresetBank::saveUser ("DelTest " + juce::String (i),
                                                  { "User", "Bass" },
-                                                 PresetBank::capture (proc.apvts));
+                                                 PresetBank::capture (proc->apvts));
             CHECK (f.existsAsFile(), "DelTest save %d failed", i);
         }
         ed->openBrowser();
@@ -467,24 +468,9 @@ int main()
         CHECK (before == nProg + 6, "browser rows %d, expected %d", before, nProg + 6);
         // last row is a user preset (All category appends users at the end)
         br->selectRowSync (before - 1);
-        CHECK (proc.getCurrentProgram() == -1, "row load did not enter user mode");
-        br->clickDel(); // async Button post: needs a live dispatch loop.
-        // Spin the loop until the delete lands (bounded): a fixed single
-        // window is flaky on loaded CI runners.
-        struct Stopper : juce::Timer
-        {
-            void timerCallback() override
-            {
-                stopTimer();
-                juce::MessageManager::getInstance()->stopDispatchLoop();
-            }
-        };
-        for (int spin = 0; spin < 20 && br->getRowCount() == before; ++spin)
-        {
-            Stopper stop;
-            stop.startTimer (100);
-            juce::MessageManager::getInstance()->runDispatchLoop();
-        }
+        CHECK (proc->getCurrentProgram() == -1, "row load did not enter user mode");
+        // Synchronous handler bodies (no message-queue timing involved).
+        CHECK (br->testDeleteSelected(), "browser delete handler failed");
         CHECK (br->getRowCount() == before - 1,
                "browser rows after del %d, expected %d", br->getRowCount(), before - 1);
         CHECK ((int) PresetBank::scanUser().size() == 5,
@@ -558,14 +544,14 @@ int main()
                     w->writeFromAudioSampleBuffer (b, 0, 4096);
             }
         }
-        int loaded = proc.importUserFolder (tmpDir.getFullPathName());
+        int loaded = proc->importUserFolder (tmpDir.getFullPathName());
         CHECK (loaded == 3, "folder import loaded %d, expected 3", loaded);
-        CHECK (proc.getUserBankCount() == 3, "bank count %d, expected 3",
-               proc.getUserBankCount());
-        CHECK (proc.getUserBankEntryName (0) == "wave0", "bank entry 0 name '%s'",
-               proc.getUserBankEntryName (0).toRawUTF8());
+        CHECK (proc->getUserBankCount() == 3, "bank count %d, expected 3",
+               proc->getUserBankCount());
+        CHECK (proc->getUserBankEntryName (0) == "wave0", "bank entry 0 name '%s'",
+               proc->getUserBankEntryName (0).toRawUTF8());
         juce::MemoryBlock blob;
-        proc.getStateInformation (blob);
+        proc->getStateInformation (blob);
         {
             std::unique_ptr<juce::XmlElement> xml (
                 juce::AudioProcessor::getXmlFromBinary (blob.getData(), (int) blob.getSize()));
@@ -593,7 +579,7 @@ int main()
         tmpDir.deleteRecursively();
     };
     {
-        ProgDriver driver (proc, checkPreset, folderStage, verifyStage,
+        ProgDriver driver (*proc, checkPreset, folderStage, verifyStage,
                                  [&] { ed->driveAsyncControls(); },
                                  [&] { CHECK (ed->verifyAsyncControls(), "async control check failed"); });
         driver.startTimer (80);
@@ -604,11 +590,11 @@ int main()
     // ---- multitimbral smoke: both banks render, mixer balances ----
     // (fresh processor: neutral defaults for both timbres, no program involved)
     {
-        NanoFrogProcessor px;
-        px.prepareToPlay (44100.0, 512);
+        auto px = std::make_unique<NanoFrogProcessor>();
+        px->prepareToPlay (44100.0, 512);
         auto setP = [&] (const char* id, float v)
         {
-            if (auto* p = px.apvts.getParameter (id))
+            if (auto* p = px->apvts.getParameter (id))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
         auto renderNote = [&]
@@ -616,7 +602,7 @@ int main()
             juce::MidiBuffer midi;
             midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
             juce::AudioBuffer<float> buf (2, 512);
-            for (int b = 0; b < 4; ++b) px.processBlock (buf, midi);
+            for (int b = 0; b < 4; ++b) px->processBlock (buf, midi);
             double acc = 0;
             for (int ch = 0; ch < 2; ++ch)
                 for (int i = 0; i < 512; ++i) acc += buf.getSample (ch, i) * buf.getSample (ch, i);
@@ -636,11 +622,11 @@ int main()
 
     // ---- arp-off releases ringing arp voices (stuck-note regression) ----
     {
-        NanoFrogProcessor px;
-        px.prepareToPlay (44100.0, 512);
+        auto px = std::make_unique<NanoFrogProcessor>();
+        px->prepareToPlay (44100.0, 512);
         auto setP = [&] (const char* id, float v)
         {
-            if (auto* p = px.apvts.getParameter (id))
+            if (auto* p = px->apvts.getParameter (id))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
         setP ("arp_on", 1.0f);
@@ -649,14 +635,14 @@ int main()
         juce::MidiBuffer midi;
         midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
         juce::AudioBuffer<float> buf (2, 512);
-        for (int b = 0; b < 44; ++b) px.processBlock (buf, midi); // ~0.5 s arp runs
+        for (int b = 0; b < 44; ++b) px->processBlock (buf, midi); // ~0.5 s arp runs
         double hot = 0;
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < 512; ++i) hot += buf.getSample (ch, i) * buf.getSample (ch, i);
         CHECK (hot > 1e-6, "arp did not sound (energy %.6f)", hot);
         setP ("arp_on", 0.0f);
         juce::MidiBuffer empty;
-        for (int b = 0; b < 175; ++b) px.processBlock (buf, empty); // ~2 s decay
+        for (int b = 0; b < 175; ++b) px->processBlock (buf, empty); // ~2 s decay
         double tail = 0;
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < 512; ++i) tail += buf.getSample (ch, i) * buf.getSample (ch, i);
@@ -670,12 +656,12 @@ int main()
         for (int i = 0; i < 4096; ++i) src[i] = (std::sin (i * 6.2831853f * 8.0f / 4096.0f) > 0 ? 0.9f : -0.9f);
         auto render = [&] (float wave, float digi)
         {
-            NanoFrogProcessor px;
-            px.prepareToPlay (44100.0, 512);
-            CHECK (px.importUserWave (src, 4096, "T"), "user import failed");
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
+            CHECK (px->importUserWave (src, 4096, "T"), "user import failed");
             auto setP = [&] (const char* id, float v)
             {
-                if (auto* p = px.apvts.getParameter (id))
+                if (auto* p = px->apvts.getParameter (id))
                     p->setValueNotifyingHost (p->convertTo0to1 (v));
             };
             setP ("osc1_wave", wave);
@@ -684,7 +670,7 @@ int main()
             juce::MidiBuffer midi;
             midi.addEvent (juce::MidiMessage::noteOn (1, 69, (juce::uint8) 100), 0);
             juce::AudioBuffer<float> buf (2, 512);
-            for (int b = 0; b < 4; ++b) px.processBlock (buf, midi);
+            for (int b = 0; b < 4; ++b) px->processBlock (buf, midi);
             return buf;
         };
         auto maxDiff = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
@@ -709,11 +695,11 @@ int main()
     {
         auto renderFM = [] (float fm)
         {
-            NanoFrogProcessor px;
-            px.prepareToPlay (44100.0, 512);
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
             auto setP = [&] (const char* id, float v)
             {
-                if (auto* p = px.apvts.getParameter (id))
+                if (auto* p = px->apvts.getParameter (id))
                     p->setValueNotifyingHost (p->convertTo0to1 (v));
             };
             setP ("osc1_wave", 3.0f); // sine carrier
@@ -724,7 +710,7 @@ int main()
             juce::MidiBuffer midi;
             midi.addEvent (juce::MidiMessage::noteOn (1, 69, (juce::uint8) 100), 0);
             juce::AudioBuffer<float> buf (2, 512);
-            for (int b = 0; b < 4; ++b) px.processBlock (buf, midi);
+            for (int b = 0; b < 4; ++b) px->processBlock (buf, midi);
             return buf;
         };
         auto a = renderFM (0.0f), b = renderFM (0.5f);
@@ -738,11 +724,11 @@ int main()
 
     // ---- limiter ceiling ----
     {
-        NanoFrogProcessor px;
-        px.prepareToPlay (44100.0, 512);
+        auto px = std::make_unique<NanoFrogProcessor>();
+        px->prepareToPlay (44100.0, 512);
         auto setP = [&] (const char* id, float v)
         {
-            if (auto* p = px.apvts.getParameter (id))
+            if (auto* p = px->apvts.getParameter (id))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
         setP ("eq_low", 12.0f); setP ("eq_high", 12.0f);
@@ -753,10 +739,10 @@ int main()
         juce::MidiBuffer midi;
         midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
         juce::AudioBuffer<float> buf (2, 512);
-        for (int b = 0; b < 4; ++b) px.processBlock (buf, midi);
+        for (int b = 0; b < 4; ++b) px->processBlock (buf, midi);
         float off = buf.getMagnitude (0, 512);
         setP ("limiter", 1.0f);
-        for (int b = 0; b < 4; ++b) px.processBlock (buf, midi);
+        for (int b = 0; b < 4; ++b) px->processBlock (buf, midi);
         float on = buf.getMagnitude (0, 512);
         CHECK (on <= 1.0f, "limiter ceiling breached (%.3f)", on);
         CHECK (on < off, "limiter did not engage (%.3f vs %.3f)", on, off);
@@ -811,7 +797,7 @@ int main()
             "t2_env2_a", "t2_env2_d", "t2_env2_s", "t2_env2_r" };
         auto rawOf = [&] (const char* id)
         {
-            if (auto* pv = proc.apvts.getRawParameterValue (id)) return pv->load();
+            if (auto* pv = proc->apvts.getRawParameterValue (id)) return pv->load();
             return 0.0f;
         };
         auto snapshotEnv = [&]
@@ -825,15 +811,15 @@ int main()
         {
             int idx = PresetBank::findByName ("Reese Criminal");
             CHECK (idx >= 0, "Reese Criminal missing");
-            proc.loadFactoryPreset (idx);
+            proc->loadFactoryPreset (idx);
             auto envBefore = snapshotEnv();
-            auto allBefore = PresetBank::capture (proc.apvts);
+            auto allBefore = PresetBank::capture (proc->apvts);
             static const char* pitchIds[] = {
                 "osc1_octave", "osc1_pitch", "osc2_octave", "osc2_pitch",
                 "t2_osc1_octave", "t2_osc1_pitch", "t2_osc2_octave", "t2_osc2_pitch" };
             std::vector<float> pitchBefore;
             for (auto* pid : pitchIds) pitchBefore.push_back (rawOf (pid));
-            proc.mutateCurrentPatch();
+            proc->mutateCurrentPatch();
             auto envAfter = snapshotEnv();
             for (size_t k = 0; k < envBefore.size(); ++k)
                 CHECK (envAfter[k] == envBefore[k],
@@ -842,7 +828,7 @@ int main()
                 CHECK (rawOf (pitchIds[k]) == pitchBefore[k],
                        "mutate moved pitch %d", (int) k);
             int diffs = 0;
-            auto allAfter = PresetBank::capture (proc.apvts);
+            auto allAfter = PresetBank::capture (proc->apvts);
             for (int k = 0; k < PresetBank::kParamCount; ++k)
                 if (allAfter[k] != allBefore[k]) ++diffs;
             CHECK (diffs > 0, "mutate changed nothing on bass");
@@ -854,8 +840,8 @@ int main()
         {
             int idx = PresetBank::findByName ("808 Menace");
             CHECK (idx >= 0, "808 Menace missing");
-            proc.loadFactoryPreset (idx);
-            proc.mutateCurrentPatch();
+            proc->loadFactoryPreset (idx);
+            proc->mutateCurrentPatch();
             CHECK (rawOf ("osc2_level") == 0.0f && rawOf ("mix_o2") == 0.0f,
                    "mutate woke silent osc2");
             CHECK (rawOf ("delay_mix") == 0.0f, "mutate woke the delay");
@@ -874,9 +860,9 @@ int main()
         {
             int idx = PresetBank::findByName ("Polar Glow");
             CHECK (idx >= 0, "Polar Glow missing");
-            proc.loadFactoryPreset (idx);
+            proc->loadFactoryPreset (idx);
             auto envBefore = snapshotEnv();
-            proc.mutateCurrentPatch();
+            proc->mutateCurrentPatch();
             auto envAfter = snapshotEnv();
             bool moved = false;
             for (size_t k = 0; k < envBefore.size(); ++k)
@@ -887,13 +873,13 @@ int main()
         printf ("mutate: ok\n");
     }
     {
-        auto& st = proc.apvts.state;
+        auto& st = proc->apvts.state;
         std::set<juce::String> ids;
         for (int i = 0; i < st.getNumChildren(); ++i)
             ids.insert (st.getChild (i).getProperty ("id").toString());
         CHECK ((int) ids.size() == 152, "unique param ids %d, expected 152", (int) ids.size());
         for (int k = 0; k < 152; ++k)
-            if (proc.apvts.getParameter (kIds[k]) == nullptr)
+            if (proc->apvts.getParameter (kIds[k]) == nullptr)
             {
                 CHECK (false, "kIds[%d] %s missing from APVTS", k, kIds[k]);
                 break;

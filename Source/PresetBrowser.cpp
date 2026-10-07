@@ -80,46 +80,8 @@ PresetBrowser::PresetBrowser (NanoFrogProcessor& p)
         }
         else showStatus ("Save failed");
     };
-    overBtn.onClick = [&]
-    {
-        int r = list.getSelectedRow();
-        if (r < 0 || r >= (int) rows.size()) { showStatus ("Select a user preset"); return; }
-        int id = rows[(size_t) r];
-        if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return; }
-        // Copy out first: rebuildRows() below replaces the users vector.
-        juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
-        juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
-        juce::StringArray utags = users[(size_t) PresetBank::userRowIndex (id)].tags;
-        if (PresetBank::overwriteUser (ufile, PresetBank::capture (proc.apvts), utags))
-        {
-            rebuildRows();
-            showStatus ("Overwrote '" + uname + "'");
-            if (onPresetChanged) onPresetChanged();
-        }
-        else showStatus ("Overwrite failed");
-    };
-    delBtn.onClick = [&]
-    {
-        int r = list.getSelectedRow();
-        if (r < 0 || r >= (int) rows.size()) return;
-        int id = rows[(size_t) r];
-        if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return; }
-        // Copy out first: rebuildRows() below replaces the users vector.
-        juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
-        juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
-        bool wasCurrent = (currentUserFile == ufile.getFileName());
-        if (PresetBank::deleteUser (ufile))
-        {
-            if (wasCurrent)
-            {
-                currentUserFile.clear();
-                proc.forgetUserPreset(); // sound stays, name no longer ghosts
-            }
-            rebuildRows();
-            showStatus ("Deleted '" + uname + "'");
-            if (onPresetChanged) onPresetChanged();
-        }
-    };
+    overBtn.onClick = [&] { overwriteSelectedRow(); };
+    delBtn.onClick = [&] { deleteSelectedRow(); };
     for (auto* b : { &saveBtn, &overBtn, &delBtn }) addAndMakeVisible (b);
     addAndMakeVisible (closeBtn);
     addAndMakeVisible (status);
@@ -222,6 +184,52 @@ void PresetBrowser::paintListBoxItem (int row, juce::Graphics& g, int w, int h, 
     g.setColour (NanoColors::dim.withAlpha (0.7f));
     g.setFont (look.uiFont (11.5f));
     g.drawText (rowTags (row), 58, 0, w - 74, h, juce::Justification::centredRight, true);
+}
+
+bool PresetBrowser::overwriteSelectedRow()
+{
+    int r = list.getSelectedRow();
+    if (r < 0 || r >= (int) rows.size()) { showStatus ("Select a user preset"); return false; }
+    int id = rows[(size_t) r];
+    if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return false; }
+    // Copy out first: rebuildRows() below replaces the users vector.
+    juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
+    juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
+    juce::StringArray utags = users[(size_t) PresetBank::userRowIndex (id)].tags;
+    if (PresetBank::overwriteUser (ufile, PresetBank::capture (proc.apvts), utags))
+    {
+        rebuildRows();
+        showStatus ("Overwrote '" + uname + "'");
+        if (onPresetChanged) onPresetChanged();
+        return true;
+    }
+    showStatus ("Overwrite failed");
+    return false;
+}
+
+bool PresetBrowser::deleteSelectedRow()
+{
+    int r = list.getSelectedRow();
+    if (r < 0 || r >= (int) rows.size()) return false;
+    int id = rows[(size_t) r];
+    if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return false; }
+    // Copy out first: rebuildRows() below replaces the users vector.
+    juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
+    juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
+    bool wasCurrent = (currentUserFile == ufile.getFileName());
+    if (PresetBank::deleteUser (ufile))
+    {
+        if (wasCurrent)
+        {
+            currentUserFile.clear();
+            proc.forgetUserPreset(); // sound stays, name no longer ghosts
+        }
+        rebuildRows();
+        showStatus ("Deleted '" + uname + "'");
+        if (onPresetChanged) onPresetChanged();
+        return true;
+    }
+    return false;
 }
 
 void PresetBrowser::loadRow (int r)

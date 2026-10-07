@@ -28,7 +28,10 @@ public:
         list.selectRow (r, false, true); // fires selectedRowsChanged inline
         loadRow (r); // plus direct load in case selection was already current
     }
-    void clickDel() { delBtn.triggerClick(); } // test hook (async dispatch)
+    // Test hooks: run the real OVER/DEL handler bodies synchronously
+    // (no message-queue timing involved).
+    bool testOverwriteSelected() { return overwriteSelectedRow(); }
+    bool testDeleteSelected() { return deleteSelectedRow(); }
 
 private:
     int getNumRows() override;
@@ -40,6 +43,10 @@ private:
     void rebuildRows();
     void refreshCatButtons();
     void loadRow (int r);
+    // The exact bodies behind the OVER/DEL buttons (locals copied out before
+    // any vector rebuild: use-after-free otherwise). Returns success.
+    bool overwriteSelectedRow();
+    bool deleteSelectedRow();
     void showStatus (const juce::String& t);
     juce::String rowName (int r) const;
     juce::String rowTags (int r) const;
