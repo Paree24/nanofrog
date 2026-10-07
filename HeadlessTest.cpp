@@ -29,11 +29,16 @@ int main()
         juce::File here (__FILE__);
         juce::File json = here.getParentDirectory().getChildFile ("FactoryBank")
                               .getChildFile ("NanoFrogFactory.json");
-        setenv ("NANOFROG_FACTORY_JSON", json.getFullPathName().toRawUTF8(), 1);
         juce::File udir = juce::File::getSpecialLocation (juce::File::tempDirectory)
                               .getChildFile ("nb_usertest");
         udir.deleteRecursively();
+#ifdef _WIN32
+        _putenv_s ("NANOFROG_FACTORY_JSON", json.getFullPathName().toRawUTF8());
+        _putenv_s ("NANOFROG_USER_DIR", udir.getFullPathName().toRawUTF8());
+#else
+        setenv ("NANOFROG_FACTORY_JSON", json.getFullPathName().toRawUTF8(), 1);
         setenv ("NANOFROG_USER_DIR", udir.getFullPathName().toRawUTF8(), 1);
+#endif
     }
 
     NanoFrogProcessor proc;
@@ -463,7 +468,9 @@ int main()
         // last row is a user preset (All category appends users at the end)
         br->selectRowSync (before - 1);
         CHECK (proc.getCurrentProgram() == -1, "row load did not enter user mode");
-        br->clickDel(); // async Button post: needs a live dispatch loop
+        br->clickDel(); // async Button post: needs a live dispatch loop.
+        // Spin the loop until the delete lands (bounded): a fixed single
+        // window is flaky on loaded CI runners.
         struct Stopper : juce::Timer
         {
             void timerCallback() override
@@ -472,9 +479,12 @@ int main()
                 juce::MessageManager::getInstance()->stopDispatchLoop();
             }
         };
-        Stopper stop;
-        stop.startTimer (150);
-        juce::MessageManager::getInstance()->runDispatchLoop();
+        for (int spin = 0; spin < 20 && br->getRowCount() == before; ++spin)
+        {
+            Stopper stop;
+            stop.startTimer (100);
+            juce::MessageManager::getInstance()->runDispatchLoop();
+        }
         CHECK (br->getRowCount() == before - 1,
                "browser rows after del %d, expected %d", br->getRowCount(), before - 1);
         CHECK ((int) PresetBank::scanUser().size() == 5,
