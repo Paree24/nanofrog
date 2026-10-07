@@ -53,6 +53,7 @@ private:
     juce::TextButton prevBtn { "<" }, nextBtn { ">" };
     juce::ComboBox presetBox;
     juce::TextButton browseBtn { "BROWSE" };
+    juce::TextButton mutateBtn { "MUTATE" };
     std::unique_ptr<PresetBrowser> browser;
     juce::TextButton tabT1 { "TIMBRE 1" }, tabT2 { "TIMBRE 2" };
     int curPage = 0;
