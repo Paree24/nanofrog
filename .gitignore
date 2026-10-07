@@ -1,0 +1,19 @@
+# Build output (JUCE is fetched fresh by CMake, artefacts regenerate)
+build/
+cmake-build-*/
+out/
+
+# Compiled objects / libs (always under build/, belt and braces)
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+
+# Editors / OS noise
+.vscode/
+.idea/
+*~
+*.swp
+.DS_Store
+Thumbs.db
