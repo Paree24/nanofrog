@@ -243,6 +243,9 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addAndMakeVisible (browseBtn);
     browseBtn.setTooltip ("Open preset browser (search + tags)");
     browseBtn.onClick = [&] { openBrowser(); };
+    addAndMakeVisible (mutateBtn);
+    mutateBtn.setTooltip ("Slightly re-rolls the sound (envelopes frozen for bass/keys/leads/percussive)");
+    mutateBtn.onClick = [&] { proc.mutateCurrentPatch(); };
     // Browser overlay last: paints above everything while open.
     browser = std::make_unique<PresetBrowser> (proc);
     browser->setVisible (false);
@@ -1149,6 +1152,7 @@ void FrogContent::resized()
     nextBtn.setBounds (194, 11, 28, 24);
     presetBox.setBounds (228, 11, 240, 24);
     browseBtn.setBounds (472, 11, 72, 24);
+    mutateBtn.setBounds (837, 11, 100, 24);
 }
 
 void FrogContent::timerCallback()

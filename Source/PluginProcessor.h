@@ -38,6 +38,11 @@ public:
     juce::String getCurrentUserPreset() const { return currentUser; }
     // Drops the user name tag (e.g. its file was deleted); sound untouched.
     void forgetUserPreset() { currentUser.clear(); }
+    // One-click flavour re-roll (message thread only): jitters continuous
+    // params a few percent, plus small musical steps on osc selectors.
+    // Bass/keys/leads/percussive voices keep their envelopes (category
+    // comes from the current preset's tags).
+    void mutateCurrentPatch();
     // Immediate factory load for the browser (message thread only; hosts must
     // use setCurrentProgram, which defers to the message thread).
     void loadFactoryPreset (int index)

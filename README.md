@@ -16,7 +16,9 @@ knob crossfades Timbre 1 ↔ Timbre 2.
 
 It ships 401 original factory presets as editable JSON data (never compiled
 in) with category/character tags, a preset browser with search + tag
-filters, and user preset save/overwrite/delete.
+filters, and user preset save/overwrite/delete, plus a header MUTATE button that slightly
+re-rolls the current sound (oscillators included; envelopes frozen for
+bass/keys/leads/percussive voices; bypassed modules never wake up).
 
 All DSP, wavetables, UI, and presets are original work. This project is not
 affiliated with, endorsed by, or connected to any hardware or software

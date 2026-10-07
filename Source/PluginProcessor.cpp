@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <random>
 #include <vector>
 
 NanoFrogProcessor::NanoFrogProcessor()
@@ -597,6 +598,175 @@ juce::StringArray NanoFrogProcessor::getFactoryNames() const
     juce::StringArray a;
     for (int i = 0; i < PresetBank::count(); ++i) a.add (PresetBank::get (i).name);
     return a;
+}
+
+void NanoFrogProcessor::mutateCurrentPatch()
+{
+    // Message thread only (driven by the header MUTATE button).
+    juce::StringArray tags;
+    if (currentPreset >= 0 && currentPreset < PresetBank::count())
+        tags = PresetBank::get (currentPreset).tags;
+    else if (currentUser.isNotEmpty())
+    {
+        NanoPreset np;
+        if (PresetBank::readUser (PresetBank::userDir().getChildFile (currentUser), np))
+            tags = np.tags;
+    }
+    juce::String cat = tags.isEmpty() ? juce::String() : tags[0];
+    if (cat == "User" && tags.size() > 1) cat = tags[1]; // user files tag [User, category]
+    // Bass/keys/leads/percussive (Hit = stabs, Bell = bells/plucks) voices
+    // keep their envelopes: transients carry these sounds.
+    bool freezeAdsr = (cat == "Bass" || cat == "Lead" || cat == "Keys"
+                       || cat == "Hit" || cat == "Bell");
+
+    auto rawOf = [&] (const juce::String& pid) -> float
+    {
+        if (auto* pv = apvts.getRawParameterValue (pid)) return pv->load();
+        return 0.0f;
+    };
+    // Audibility gates: mutate flavour, never wake a bypassed module.
+    // Shared modules first (no timbre prefix).
+    bool modfxLive = ((int) std::round (rawOf ("modfx_type")) != 0
+                      && rawOf ("modfx_mix") > 0.0f);
+    bool delayLive = rawOf ("delay_mix") > 0.0f;
+    struct TimbreGate
+    {
+        bool lfoLive[2] = {};
+        bool modLive[4] = {};
+        bool fmLive = false;
+        bool oscLive[2] = {};
+        bool noiseLive = false;
+    };
+    auto gateFor = [&] (const juce::String& pre)
+    {
+        TimbreGate g;
+        for (int l = 0; l < 2; ++l)
+            g.lfoLive[l] = rawOf (pre + (l == 0 ? "lfo1_depth" : "lfo2_depth")) > 0.0f;
+        for (int m = 0; m < 4; ++m)
+            g.modLive[m] = rawOf (pre + "mod" + juce::String (m + 1) + "_amt") != 0.0f;
+        g.fmLive = rawOf (pre + "fm_amt") > 0.0f;
+        for (int o = 0; o < 2; ++o)
+            g.oscLive[o] = rawOf (pre + (o == 0 ? "osc1_level" : "osc2_level")) > 0.0f
+                        && rawOf (pre + (o == 0 ? "mix_o1" : "mix_o2")) > 0.0f;
+        g.noiseLive = rawOf (pre + "mix_noise") > 0.0f;
+        if (! g.noiseLive)
+            for (int m = 0; m < 4; ++m)
+                if ((int) std::round (rawOf (pre + "mod" + juce::String (m + 1) + "_dst")) == 3
+                    && rawOf (pre + "mod" + juce::String (m + 1) + "_amt") != 0.0f)
+                { g.noiseLive = true; break; }
+        return g;
+    };
+    TimbreGate gate[2] = { gateFor (""), gateFor ("t2_") };
+
+    std::mt19937 rng { std::random_device{}() };
+    auto chance = [&] (double p)
+    {
+        return std::uniform_real_distribution<double> (0.0, 1.0) (rng) < p;
+    };
+    auto warranted = [&] (const juce::String& base) // structural/master: never touched
+    {
+        return base == "osc_mod" || base == "filter_type"
+            || base == "voice_poly" || base == "voice_portamento"
+            || base == "voice_vib" || base == "output_level"
+            || base == "master_tune" || base == "song_tempo" || base == "tmix"
+            || base == "modfx_type" || base == "delay_type";
+    };
+    auto isAdsr = [&] (const juce::String& base)
+    {
+        return base == "env1_a" || base == "env1_d" || base == "env1_s"
+            || base == "env1_r" || base == "env2_a" || base == "env2_d"
+            || base == "env2_s" || base == "env2_r";
+    };
+    auto spanFor = [&] (const juce::String& base) // normalized-range fraction
+    {
+        if (base.endsWith ("_fine")) return 0.08; // ~+-4 cents
+        if (base == "voice_detune") return 0.15;
+        if (base.endsWith ("_shape") || base.endsWith ("_pwm")
+            || base.endsWith ("_xmod")) return 0.12;
+        if (base.endsWith ("_level") || base.startsWith ("mix_")
+            || base == "fm_amt") return 0.10;
+        if (base == "filter_cutoff" || base == "filter_reso") return 0.08;
+        if (base == "filter_keytrack" || base == "filter_envamt") return 0.12;
+        if (base == "amp_pan" || base == "amp_velocity") return 0.10;
+        if (base == "amp_drive") return 0.12;
+        if (base == "amp_level") return 0.10;
+        if (base.endsWith ("_rate") || base.endsWith ("_depth")) return 0.12;
+        if (base.endsWith ("_amt")) return 0.12;
+        if (base == "delay_time" || base == "delay_feedback"
+            || base == "delay_mix" || base == "modfx_rate"
+            || base == "modfx_depth" || base == "modfx_mix") return 0.10;
+        if (base == "eq_low" || base == "eq_high") return 0.06;
+        if (base == "env1_s" || base == "env2_s") return 0.08;
+        if (base.startsWith ("env1_") || base.startsWith ("env2_")) return 0.12;
+        return 0.06;
+    };
+
+    for (int i = 0; i < PresetBank::kParamCount; ++i)
+    {
+        juce::String id = PresetBank::kParamIds[i];
+        juce::String base = id.startsWith ("t2_") ? id.substring (3) : id;
+        if (warranted (base)) continue;
+        if (freezeAdsr && isAdsr (base)) continue;
+        // Never wake a bypassed module: same modules, different flavour.
+        int ti = id.startsWith ("t2_") ? 1 : 0;
+        bool gated = false;
+        if (base == "modfx_rate" || base == "modfx_depth" || base == "modfx_mix")
+            gated = ! modfxLive;
+        else if (base == "delay_time" || base == "delay_feedback" || base == "delay_mix")
+            gated = ! delayLive;
+        else if (base == "lfo1_rate" || base == "lfo1_depth")
+            gated = ! gate[ti].lfoLive[0];
+        else if (base == "lfo2_rate" || base == "lfo2_depth")
+            gated = ! gate[ti].lfoLive[1];
+        else if (base.startsWith ("mod") && base.endsWith ("_amt")
+                 && base[3] >= '1' && base[3] <= '4')
+            gated = ! gate[ti].modLive[base[3] - '1'];
+        else if (base == "fm_amt")
+            gated = ! gate[ti].fmLive;
+        else if (base == "osc1_level" || base == "mix_o1")
+            gated = ! gate[ti].oscLive[0];
+        else if (base == "osc2_level" || base == "mix_o2")
+            gated = ! gate[ti].oscLive[1];
+        else if (base == "mix_noise")
+            gated = ! gate[ti].noiseLive;
+        if (gated) continue;
+        auto* p = apvts.getParameter (id);
+        if (p == nullptr) continue;
+        p->beginChangeGesture();
+        if (auto* f = dynamic_cast<juce::AudioParameterFloat*> (p))
+        {
+            juce::ignoreUnused (f);
+            float v = p->getValue();
+            float d = (float) (std::uniform_real_distribution<double> (-1.0, 1.0) (rng)
+                               * spanFor (base));
+            p->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, v + d));
+        }
+        else if (auto* c = dynamic_cast<juce::AudioParameterChoice*> (p))
+        {
+            juce::ignoreUnused (c);
+            int n = 0;
+            if (auto* ch = dynamic_cast<juce::AudioParameterChoice*> (
+                    apvts.getParameter (id)))
+                n = ch->choices.size();
+            int cur = (int) std::round (p->convertFrom0to1 (p->getValue()));
+            int next = cur;
+            // Osc selectors may step musically; everything else stays put.
+            if ((base == "osc1_wave" || base == "osc2_wave") && chance (0.12))
+                next = (int) (std::uniform_int_distribution<int> (0, 6) (rng));
+            else if ((base == "osc1_octave" || base == "osc2_octave") && chance (0.08))
+                next = juce::jlimit (-2, 2, cur + (chance (0.5) ? 1 : -1));
+            else if ((base == "osc1_pitch" || base == "osc2_pitch") && chance (0.12))
+                next = juce::jlimit (-12, 12, cur + (chance (0.5) ? 1 : -1)
+                                     * (chance (0.25) ? 2 : 1));
+            else if ((base == "osc1_digital" || base == "osc2_digital") && chance (0.25))
+                next = juce::jlimit (0, n - 1, cur
+                                     + (chance (0.5) ? 1 : -1)
+                                     * (int) (std::uniform_int_distribution<int> (1, 8) (rng)));
+            if (next != cur)
+                p->setValueNotifyingHost (p->convertTo0to1 ((float) next));
+        }
+        p->endChangeGesture();
+    }
 }
 
 void NanoFrogProcessor::applyPreset (int index)

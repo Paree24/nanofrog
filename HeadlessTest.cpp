@@ -792,7 +792,81 @@ int main()
         printf ("audibility: %d presets checked\n", checked);
     }
 
-    // ---- parameter registry audit: 152 unique params, kIds resolves ----
+    // ---- mutate: ADSR freeze, no-enable gates, pad freedom ----
+    {
+        static const char* envIds[] = {
+            "env1_a", "env1_d", "env1_s", "env1_r",
+            "env2_a", "env2_d", "env2_s", "env2_r",
+            "t2_env1_a", "t2_env1_d", "t2_env1_s", "t2_env1_r",
+            "t2_env2_a", "t2_env2_d", "t2_env2_s", "t2_env2_r" };
+        auto rawOf = [&] (const char* id)
+        {
+            if (auto* pv = proc.apvts.getRawParameterValue (id)) return pv->load();
+            return 0.0f;
+        };
+        auto snapshotEnv = [&]
+        {
+            std::vector<float> v;
+            for (auto* eid : envIds) v.push_back (rawOf (eid));
+            return v;
+        };
+        // Bass: envelopes frozen, something else moves, gated modules stay off
+        {
+            int idx = PresetBank::findByName ("Reese Criminal");
+            CHECK (idx >= 0, "Reese Criminal missing");
+            proc.loadFactoryPreset (idx);
+            auto envBefore = snapshotEnv();
+            auto allBefore = PresetBank::capture (proc.apvts);
+            proc.mutateCurrentPatch();
+            auto envAfter = snapshotEnv();
+            for (size_t k = 0; k < envBefore.size(); ++k)
+                CHECK (envAfter[k] == envBefore[k],
+                       "mutate moved bass envelope %d", (int) k);
+            int diffs = 0;
+            auto allAfter = PresetBank::capture (proc.apvts);
+            for (int k = 0; k < PresetBank::kParamCount; ++k)
+                if (allAfter[k] != allBefore[k]) ++diffs;
+            CHECK (diffs > 0, "mutate changed nothing on bass");
+            CHECK (rawOf ("delay_mix") == 0.0f, "mutate woke the delay");
+            CHECK (rawOf ("fm_amt") == 0.0f, "mutate woke FM");
+            printf ("mutate bass: %d params moved, envelopes frozen\n", diffs);
+        }
+        // 808 Menace (silent osc2, no FX, no LFO, no mods): sleepers stay asleep
+        {
+            int idx = PresetBank::findByName ("808 Menace");
+            CHECK (idx >= 0, "808 Menace missing");
+            proc.loadFactoryPreset (idx);
+            proc.mutateCurrentPatch();
+            CHECK (rawOf ("osc2_level") == 0.0f && rawOf ("mix_o2") == 0.0f,
+                   "mutate woke silent osc2");
+            CHECK (rawOf ("delay_mix") == 0.0f, "mutate woke the delay");
+            CHECK (rawOf ("lfo1_depth") == 0.0f && rawOf ("lfo2_depth") == 0.0f,
+                   "mutate woke a sleeping LFO");
+            CHECK (rawOf ("modfx_type") == 0.0f, "mutate enabled modfx");
+            for (int m = 1; m <= 4; ++m)
+            {
+                juce::String aid = "mod" + juce::String (m) + "_amt";
+                CHECK (rawOf (aid.toRawUTF8()) == 0.0f,
+                       "mutate woke mod slot %d", m);
+            }
+            printf ("mutate gates: sleepers stayed asleep\n");
+        }
+        // Pad: envelopes free to move, and something does move
+        {
+            int idx = PresetBank::findByName ("Polar Glow");
+            CHECK (idx >= 0, "Polar Glow missing");
+            proc.loadFactoryPreset (idx);
+            auto envBefore = snapshotEnv();
+            proc.mutateCurrentPatch();
+            auto envAfter = snapshotEnv();
+            bool moved = false;
+            for (size_t k = 0; k < envBefore.size(); ++k)
+                if (envAfter[k] != envBefore[k]) moved = true;
+            CHECK (moved, "mutate froze pad envelopes");
+            printf ("mutate pad: envelopes free\n");
+        }
+        printf ("mutate: ok\n");
+    }
     {
         auto& st = proc.apvts.state;
         std::set<juce::String> ids;
