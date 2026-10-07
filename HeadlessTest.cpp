@@ -810,18 +810,27 @@ int main()
             for (auto* eid : envIds) v.push_back (rawOf (eid));
             return v;
         };
-        // Bass: envelopes frozen, something else moves, gated modules stay off
+        // Bass: envelopes frozen, pitch frozen, something else moves,
+        // gated modules stay off
         {
             int idx = PresetBank::findByName ("Reese Criminal");
             CHECK (idx >= 0, "Reese Criminal missing");
             proc.loadFactoryPreset (idx);
             auto envBefore = snapshotEnv();
             auto allBefore = PresetBank::capture (proc.apvts);
+            static const char* pitchIds[] = {
+                "osc1_octave", "osc1_pitch", "osc2_octave", "osc2_pitch",
+                "t2_osc1_octave", "t2_osc1_pitch", "t2_osc2_octave", "t2_osc2_pitch" };
+            std::vector<float> pitchBefore;
+            for (auto* pid : pitchIds) pitchBefore.push_back (rawOf (pid));
             proc.mutateCurrentPatch();
             auto envAfter = snapshotEnv();
             for (size_t k = 0; k < envBefore.size(); ++k)
                 CHECK (envAfter[k] == envBefore[k],
                        "mutate moved bass envelope %d", (int) k);
+            for (size_t k = 0; k < pitchBefore.size(); ++k)
+                CHECK (rawOf (pitchIds[k]) == pitchBefore[k],
+                       "mutate moved pitch %d", (int) k);
             int diffs = 0;
             auto allAfter = PresetBank::capture (proc.apvts);
             for (int k = 0; k < PresetBank::kParamCount; ++k)

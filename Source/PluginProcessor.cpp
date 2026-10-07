@@ -666,6 +666,7 @@ void NanoFrogProcessor::mutateCurrentPatch()
     auto warranted = [&] (const juce::String& base) // structural/master: never touched
     {
         return base == "osc_mod" || base == "filter_type"
+            || base.endsWith ("_octave") || base.endsWith ("_pitch") // pitch never moves
             || base == "voice_poly" || base == "voice_portamento"
             || base == "voice_vib" || base == "output_level"
             || base == "master_tune" || base == "song_tempo" || base == "tmix"
@@ -750,14 +751,10 @@ void NanoFrogProcessor::mutateCurrentPatch()
                 n = ch->choices.size();
             int cur = (int) std::round (p->convertFrom0to1 (p->getValue()));
             int next = cur;
-            // Osc selectors may step musically; everything else stays put.
+            // Osc selectors may step musically (never pitch); everything else
+            // stays put.
             if ((base == "osc1_wave" || base == "osc2_wave") && chance (0.12))
                 next = (int) (std::uniform_int_distribution<int> (0, 6) (rng));
-            else if ((base == "osc1_octave" || base == "osc2_octave") && chance (0.08))
-                next = juce::jlimit (-2, 2, cur + (chance (0.5) ? 1 : -1));
-            else if ((base == "osc1_pitch" || base == "osc2_pitch") && chance (0.12))
-                next = juce::jlimit (-12, 12, cur + (chance (0.5) ? 1 : -1)
-                                     * (chance (0.25) ? 2 : 1));
             else if ((base == "osc1_digital" || base == "osc2_digital") && chance (0.25))
                 next = juce::jlimit (0, n - 1, cur
                                      + (chance (0.5) ? 1 : -1)
