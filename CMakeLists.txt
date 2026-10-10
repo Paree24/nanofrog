@@ -23,7 +23,7 @@ juce_add_binary_data(NanoFrogAssets
 )
 
 juce_add_plugin(NanoFrog
-    COMPANY_NAME "NanoFrog Audio"
+    COMPANY_NAME "NanoFrog"
     PLUGIN_MANUFACTURER_CODE NbAg
     PLUGIN_CODE Nb01
     FORMATS VST3 Standalone
