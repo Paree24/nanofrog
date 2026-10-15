@@ -1,6 +1,8 @@
 #include "PresetBank.h"
 #include <cstdlib>
 #include <map>
+#include <cmath>
+#include <limits>
 
 namespace PresetBank
 {
@@ -162,6 +164,7 @@ const char* const kParamIds[kParamCount] = {
 
 // ------------------------------------------------------------------ bank
 static std::vector<NanoPreset> factory;
+static std::vector<NanoPreset> shipped; // bank as loaded, before user shadows
 static bool loaded = false;
 static bool fallback = false;
 
@@ -230,7 +233,9 @@ static bool loadBankFile (const juce::File& f)
         auto tags = po->getProperty ("tags");
         if (tags.isArray())
             for (auto& t : *tags.getArray()) np.tags.add (t.toString());
-        np.values.assign (kParamCount, 0.0f);
+        // NaN = "not in file": apply() leaves it at the parameter default
+        // (0.0 would silently zero e.g. levels in older/partial files).
+        np.values.assign (kParamCount, std::numeric_limits<float>::quiet_NaN());
         auto vals = po->getProperty ("values");
         if (! vals.isArray()) continue;
         int n = juce::jmin (vals.getArray()->size(),
@@ -247,7 +252,8 @@ static bool loadBankFile (const juce::File& f)
         bank.push_back (std::move (np));
     }
     if (bank.empty()) return false;
-    factory = std::move (bank);
+    shipped = std::move (bank);
+    factory = shipped;
     return true;
 }
 
@@ -258,7 +264,7 @@ void ensureLoaded()
     std::vector<juce::File> paths;
     searchPaths (paths);
     for (auto& f : paths)
-        if (f.existsAsFile() && loadBankFile (f)) { fallback = false; return; }
+        if (f.existsAsFile() && loadBankFile (f)) { fallback = false; rescanShadows(); return; }
     fallback = true; // processor installs an Init voice from live defaults
 }
 
@@ -274,6 +280,7 @@ void installFallback (const std::vector<float>& defaultValues)
     np.tags.add ("Init");
     np.tags.add ("Single");
     factory = { std::move (np) };
+    shipped = factory;
     fallback = true;
     loaded = true;
 }
@@ -445,6 +452,72 @@ bool overwriteUser (const juce::File& file, const std::vector<float>& values,
     return writePresetFile (file, name, tags, values);
 }
 
+juce::File userFileFor (const juce::String& name)
+{
+    return userDir().getChildFile (sanitise (name) + ".nbpreset");
+}
+
+// ------------------------------------------------------------------ factory shadows
+juce::File factoryShadowDir() { return userDir().getChildFile ("Factory"); }
+
+static int shadowIndexOf (const juce::File& f) // "NNN Name.nbpreset" -> NNN
+{
+    auto fn = f.getFileName();
+    if (fn.length() < 4 || ! juce::CharacterFunctions::isDigit (fn[0])) return -1;
+    return fn.upToFirstOccurrenceOf (" ", false, false).getIntValue();
+}
+
+static juce::File shadowFileFor (int index)
+{
+    auto dir = factoryShadowDir();
+    if (dir.isDirectory())
+        for (auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.nbpreset"))
+            if (shadowIndexOf (f) == index) return f;
+    return {};
+}
+
+void rescanShadows()
+{
+    factory = shipped;
+    auto dir = factoryShadowDir();
+    if (! dir.isDirectory()) return;
+    for (auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.nbpreset"))
+    {
+        int idx = shadowIndexOf (f);
+        if (idx < 0 || idx >= (int) factory.size()) continue;
+        NanoPreset np;
+        if (! readUser (f, np)) continue;
+        auto& slot = factory[(size_t) idx];
+        for (int k = 0; k < kParamCount; ++k) // ids missing in the shadow keep shipped values
+            if (std::isfinite (np.values[(size_t) k])) slot.values[(size_t) k] = np.values[(size_t) k];
+        slot.shadowed = true; // name + tags stay the slot's
+    }
+}
+
+bool overwriteFactory (int index, const std::vector<float>& values)
+{
+    ensureLoaded();
+    if (fallback || index < 0 || index >= (int) shipped.size()) return false;
+    auto dir = factoryShadowDir();
+    if (! dir.isDirectory() && ! dir.createDirectory()) return false;
+    auto old = shadowFileFor (index);
+    if (old.existsAsFile() && ! old.deleteFile()) return false;
+    const auto& slot = shipped[(size_t) index];
+    auto file = dir.getChildFile (juce::String (index).paddedLeft ('0', 3) + " "
+                                  + sanitise (slot.name) + ".nbpreset");
+    if (! writePresetFile (file, slot.name, slot.tags, values)) return false;
+    rescanShadows();
+    return true;
+}
+
+bool restoreFactory (int index)
+{
+    auto f = shadowFileFor (index);
+    if (! f.existsAsFile() || ! f.deleteFile()) return false;
+    rescanShadows();
+    return true;
+}
+
 bool deleteUser (const juce::File& file)
 {
     if (file.getParentDirectory() != userDir()
@@ -468,7 +541,7 @@ bool readUser (const juce::File& file, NanoPreset& out)
     auto tags = obj->getProperty ("tags");
     if (tags.isArray())
         for (auto& t : *tags.getArray()) out.tags.add (t.toString());
-    out.values.assign (kParamCount, 0.0f);
+    out.values.assign (kParamCount, std::numeric_limits<float>::quiet_NaN()); // see loadBankFile
     auto idx = idIndex();
     auto ids = obj->getProperty ("param_ids");
     auto vals = obj->getProperty ("values");
@@ -512,7 +585,8 @@ void apply (juce::AudioProcessorValueTreeState& apvts, const std::vector<float>&
 {
     resetToDefaults (apvts);
     for (int i = 0; i < kParamCount && i < (int) values.size(); ++i)
-        if (auto* p = apvts.getParameter (kParamIds[i]))
+        if (! std::isfinite (values[(size_t) i])) continue; // missing: keep default
+        else if (auto* p = apvts.getParameter (kParamIds[i]))
             p->setValueNotifyingHost (p->convertTo0to1 (values[(size_t) i]));
 }
 

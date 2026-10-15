@@ -60,9 +60,28 @@ Install the VST3 by copying `NanoFrog.vst3` to your plugin folder:
 | Windows | `C:\Program Files\Common Files\VST3\`| Rescan plugins in your DAW afterwards        |
 
 User presets live in `Documents/NanoFrog/User Presets/` (created on first
-save) as single `.nbpreset` JSON files. The factory bank is data, not code:
-edit `FactoryBank/NanoFrogFactory.json` by hand, or regenerate it with
-`python3 Tools/gen_bank.py` (deterministic — same seed, same bank).
+save) as single `.nbpreset` JSON files. In the browser, the name field is
+prefilled with the current preset; SAVE (or Enter) stores it under that name,
+and an existing name needs a second click on OVERWRITE?. OVER on a factory
+preset saves your edit as a shadow copy in `User Presets/Factory/` (the
+shipped bank is never modified, the row shows `*`); DEL on that row restores
+the original.
+
+The factory bank is data, not code: edit `FactoryBank/NanoFrogFactory.json`
+by hand, or regenerate it with `python3 Tools/gen_bank.py` (deterministic:
+per-slot seeds plus `Tools/bank_salts.json`). Every preset is built from its
+recipe plus category-aware variation and must differ from all earlier ones.
+`python3 Tools/audio_diversity.py` (needs the built headless test) renders
+the bank, re-rolls presets that *sound* like an earlier one, and updates the
+salts — the shipped bank has ~1% audible near-twins (was ~70%).
+
+Every factory preset is guaranteed in key: no oscillator sits more than 25
+cents from the played note (or its fourth/fifth/octave), counting fine tune,
+Detune spread, unison, triangle Shape retune, ring/FM ratios and vibrato
+(`pitch_safe` in the generator; checked by the headless test).
+`python3 Tools/level_bank.py` measures every preset and writes
+`Tools/bank_levels.json` (output-level trims: even levels, ~2.5 dB under the
+untrimmed bank, loud outliers pulled in hardest).
 
 ### OS-specific notes
 
@@ -138,6 +157,11 @@ edit `FactoryBank/NanoFrogFactory.json` by hand, or regenerate it with
 - `Assets/` — embedded Lato fonts + OFL notice
 - `Tools/gen_bank.py` — deterministic factory-bank generator (reads the
   live parameter order from the sources, so the table can't drift)
+- `Tools/audio_diversity.py` + `Tools/bank_salts.json` — audio-verified
+  de-cloning loop for the factory bank (renders via the headless test's
+  `NANOFROG_DUMP_FEATURES` mode)
+- `Tools/level_bank.py` + `Tools/bank_levels.json` — measured loudness trims
+  (renders via the headless test's `NANOFROG_DUMP_PITCH` mode)
 - `HeadlessTest.cpp` — headless regression suite: layout geometry,
   control liveness, preset round-trips, DSP behaviour (audibility,
   arp release, digital routing, FM, limiter), user-preset save/load

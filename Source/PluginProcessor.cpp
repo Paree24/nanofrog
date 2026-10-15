@@ -11,6 +11,11 @@ NanoFrogProcessor::NanoFrogProcessor()
       apvts (*this, nullptr, "PARAMS", createParameterLayout())
 {
     PresetBank::ensureLoaded();
+    // Audio-thread containers never grow mid-stream: reserve worst cases.
+    heldNotes.reserve (128);
+    arp.held.reserve (128);
+    arp.sorted.reserve (128);
+    arp.pattern.reserve (128 * 4 * 2);
     if (PresetBank::isFallback())
         PresetBank::installFallback (PresetBank::capture (apvts)); // Init from live defaults
 }
@@ -168,7 +173,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoFrogProcessor::createPar
     return layout;
 }
 
-static inline float pv (juce::AudioProcessorValueTreeState& s, const juce::String& id)
+// StringRef: looking a parameter up never builds a juce::String (no heap
+// allocation on the audio thread).
+static inline float pv (juce::AudioProcessorValueTreeState& s, juce::StringRef id)
 {
     if (auto* p = s.getRawParameterValue (id)) return p->load();
     return 0.0f;
@@ -183,8 +190,13 @@ float NanoFrogProcessor::egTimeFromKnob (float v01, float maxSec)
 VoiceParams NanoFrogProcessor::collectVoiceParams (int timbre)
 {
     VoiceParams p;
-    juce::String pre = timbre == 0 ? "" : "t2_";
-    auto P = [&] (const char* id) -> float { return pv (apvts, pre + id); };
+    auto P = [&] (const char* id) -> float
+    {
+        if (timbre == 0) return pv (apvts, id);
+        char buf[64];
+        std::snprintf (buf, sizeof (buf), "t2_%s", id);
+        return pv (apvts, buf);
+    };
     p.osc1Wave = (int) P ("osc1_wave");
     p.osc1Digital = (int) P ("osc1_digital");
     p.osc1Oct = (int) std::round (P ("osc1_octave"));
@@ -260,7 +272,7 @@ VoiceParams NanoFrogProcessor::collectVoiceParams (int timbre)
     return p;
 }
 
-void NanoFrogProcessor::prepareToPlay (double sampleRate, int)
+void NanoFrogProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     fs = sampleRate;
     for (int t = 0; t < 2; ++t)
@@ -268,6 +280,7 @@ void NanoFrogProcessor::prepareToPlay (double sampleRate, int)
     modfx.setSampleRate (sampleRate);
     delay.setSampleRate (sampleRate);
     eq.setSampleRate (sampleRate);
+    monoScratch.assign ((size_t) juce::jmax (1, samplesPerBlock), 0.0f);
 }
 
 int NanoFrogProcessor::allocateVoice (int timbre, int note, int poly)
@@ -294,20 +307,24 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
     if (m.isNoteOn())
     {
         int n = m.getNoteNumber();
+        float vel = m.getVelocity() / 127.0f;
+        lastVel = vel;
         sustainHeld[n] = 0;
+        // Latch: the first key of a fresh gesture replaces the latched set.
+        if (blockArpOn && blockLatch)
+        {
+            if (heldNotes.empty()) arp.held.clear();
+            if (std::find (arp.held.begin(), arp.held.end(), n) == arp.held.end())
+                arp.held.push_back (n);
+        }
         if (std::find (heldNotes.begin(), heldNotes.end(), n) == heldNotes.end())
             heldNotes.push_back (n);
-        bool arpOn = pv (apvts, "arp_on") > 0.5f;
-        if (! arpOn)
+        if (! blockArpOn)
         {
-            float vel = m.getVelocity() / 127.0f;
             for (int t = 0; t < 2; ++t)
             {
-                VoiceParams p = collectVoiceParams (t);
-                int poly = (int) std::round (
-                    pv (apvts, t == 0 ? "voice_poly" : "t2_voice_poly"));
-                int vi = allocateVoice (t, n, poly);
-                voices[t][vi].noteOn (n, vel, p, false);
+                int vi = allocateVoice (t, n, blockPoly[t]);
+                voices[t][vi].noteOn (n, vel, blockVp[t], false);
             }
         }
     }
@@ -315,31 +332,16 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
     {
         int n = m.getNoteNumber();
         heldNotes.erase (std::remove (heldNotes.begin(), heldNotes.end(), n), heldNotes.end());
-        bool arpOn = pv (apvts, "arp_on") > 0.5f;
-        bool latch = pv (apvts, "arp_latch") > 0.5f;
-        if (! arpOn || (! latch && heldNotes.empty()))
+        // Arp notes are released by the arp clock itself (arpTick).
+        if (! blockArpOn)
         {
-            if (! arpOn)
+            if (sustainPedal > 0.5f) sustainHeld[n] = 1; // pedal: defer release
+            else
             {
-                if (sustainPedal > 0.5f) sustainHeld[n] = 1; // pedal: defer release
-                else
-                {
-                    sustainHeld[n] = 0;
-                    for (int t = 0; t < 2; ++t)
-                        for (auto& v : voices[t])
-                            if (v.isActive() && v.getNote() == n) v.noteOff();
-                }
-            }
-        }
-        if (heldNotes.empty() && !(arpOn && latch))
-        {
-            // let arp stop; silence stuck arp note
-            if (arp.currentNote >= 0)
-            {
+                sustainHeld[n] = 0;
                 for (int t = 0; t < 2; ++t)
                     for (auto& v : voices[t])
-                        if (v.isActive() && v.getNote() == arp.currentNote) v.noteOff();
-                arp.currentNote = -1;
+                        if (v.isActive() && v.getNote() == n) v.noteOff();
             }
         }
     }
@@ -348,6 +350,16 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
         // LESSONS.md #13: center is 8192, with a deadband so worn wheels pin exact zero.
         int raw = m.getPitchWheelValue();
         bendSemi = (std::abs (raw - 8192) <= 48) ? 0.0f : (raw - 8192) / 8192.0f * 2.0f; // +/-2 semitones
+    }
+    else if (m.isAllNotesOff() || m.isAllSoundOff())
+    {
+        // (checked before isController: these are CC 120/123 messages)
+        heldNotes.clear();
+        arp.held.clear();
+        std::memset (sustainHeld, 0, sizeof (sustainHeld));
+        for (int t = 0; t < 2; ++t)
+            for (auto& v : voices[t]) v.noteOff();
+        arp.currentNote = -1;
     }
     else if (m.isController())
     {
@@ -372,14 +384,113 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
             }
         }
     }
-    else if (m.isAllNotesOff() || m.isAllSoundOff())
+}
+
+void NanoFrogProcessor::releaseArpNote()
+{
+    if (arp.currentNote == -2) // trigger chord
     {
-        heldNotes.clear();
-        std::memset (sustainHeld, 0, sizeof (sustainHeld));
         for (int t = 0; t < 2; ++t)
             for (auto& v : voices[t]) v.noteOff();
-        arp.currentNote = -1;
     }
+    else if (arp.currentNote >= 0)
+    {
+        for (int t = 0; t < 2; ++t)
+            for (auto& v : voices[t])
+                if (v.isActive() && v.getNote() == arp.currentNote) v.noteOff();
+    }
+    arp.currentNote = -1;
+}
+
+void NanoFrogProcessor::arpFireStep()
+{
+    const auto& src = blockLatch ? arp.held : heldNotes;
+    static const double beats[6] = { 1.0, 0.5, 0.25, 1.0/3.0, 1.0/6.0, 0.125 };
+    int ri = juce::jlimit (0, 5, (int) pv (apvts, "arp_rate"));
+    double stepSec = 60.0 / juce::jmax (20.0, effBpm) * beats[ri];
+    double stepSamples = juce::jmax (32.0, stepSec * fs);
+    // Swing lengthens even steps and shortens odd ones (pairs keep the grid).
+    float swing = juce::jlimit (-1.0f, 1.0f, pv (apvts, "arp_swing"));
+    double len = stepSamples * (1.0 + ((arp.step & 1) == 0 ? 0.5 : -0.5) * swing);
+    int mode = (int) pv (apvts, "arp_mode");
+    int octs = juce::jlimit (1, 4, (int) std::round (pv (apvts, "arp_octaves")));
+
+    auto& notes = arp.sorted;
+    notes.assign (src.begin(), src.end());
+    std::sort (notes.begin(), notes.end());
+    auto& pattern = arp.pattern;
+    pattern.clear();
+    if (mode == 1) { for (int o = octs - 1; o >= 0; --o) for (int i = (int) notes.size() - 1; i >= 0; --i) pattern.push_back (notes[(size_t) i] + o * 12); }
+    else if (mode == 5) { pattern.assign (notes.begin(), notes.end()); }
+    else
+    {
+        // Up / Random use the full octave run; Alt modes bounce over it.
+        for (int o = 0; o < octs; ++o) for (int x : notes) pattern.push_back (x + o * 12);
+        if (mode == 2 || mode == 3)
+        {
+            int upN = (int) pattern.size();
+            for (int i = upN - 2; i > 0; --i) pattern.push_back (pattern[(size_t) i]);
+            if (mode == 3) std::reverse (pattern.begin(), pattern.end());
+        }
+    }
+    if (pattern.empty()) return;
+    if (arp.step >= (int) pattern.size()) arp.step = 0;
+
+    releaseArpNote();
+    float vel = lastVel;
+    if (mode == 5) // trigger: whole chord each step
+    {
+        for (int x : notes)
+            for (int t = 0; t < 2; ++t)
+            {
+                int vi = allocateVoice (t, x, blockPoly[t]);
+                voices[t][vi].noteOn (x, vel, blockVp[t], false);
+            }
+        arp.currentNote = -2;
+    }
+    else
+    {
+        int idx = (mode == 4) ? (int) (rand() % pattern.size()) : arp.step;
+        int nn = juce::jlimit (0, 127, pattern[(size_t) idx]);
+        for (int t = 0; t < 2; ++t)
+        {
+            int vi = allocateVoice (t, nn, blockPoly[t]);
+            voices[t][vi].noteOn (nn, vel, blockVp[t], false);
+        }
+        arp.currentNote = nn;
+    }
+    arp.step++;
+    arp.samplesToNext += len;
+    arpOffCountdown = len * (double) juce::jlimit (0.05f, 1.0f, pv (apvts, "arp_gate"));
+}
+
+void NanoFrogProcessor::arpTick()
+{
+    const auto& src = blockLatch ? arp.held : heldNotes;
+    if (! blockArpOn || src.empty())
+    {
+        if (arp.running)
+        {
+            releaseArpNote();
+            arp.running = false;
+            arpOffCountdown = 0.0;
+        }
+        return;
+    }
+    if (! arp.running)
+    {
+        // fresh gesture: first step lands on the key press, not a stale phase
+        arp.running = true;
+        arp.step = 0;
+        arp.samplesToNext = 0.0;
+    }
+    if (arpOffCountdown > 0.0)
+    {
+        arpOffCountdown -= 1.0;
+        if (arpOffCountdown <= 0.0) releaseArpNote();
+    }
+    arp.samplesToNext -= 1.0;
+    if (arp.samplesToNext <= 0.0) arpFireStep();
 }
 
 void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -393,144 +504,77 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             if (pos->getBpm()) { hostBpm = *pos->getBpm(); haveHostBpm = true; }
     }
     effBpm = haveHostBpm ? hostBpm : (double) pv (apvts, "song_tempo");
-    for (const auto meta : midi)
-        handleMidi (meta.getMessage());
 
-    VoiceParams vp[2] = { collectVoiceParams (0), collectVoiceParams (1) };
-    int polyBank[2] = {
-        (int) std::round (pv (apvts, "voice_poly")),
-        (int) std::round (pv (apvts, "t2_voice_poly"))
-    };
+    blockVp[0] = collectVoiceParams (0);
+    blockVp[1] = collectVoiceParams (1);
+    blockPoly[0] = (int) std::round (pv (apvts, "voice_poly"));
+    blockPoly[1] = (int) std::round (pv (apvts, "t2_voice_poly"));
+    blockArpOn = pv (apvts, "arp_on") > 0.5f;
+    blockLatch = pv (apvts, "arp_latch") > 0.5f;
+    if (blockLatch && ! prevLatch) arp.held.assign (heldNotes.begin(), heldNotes.end());
+    if (! blockLatch && prevLatch) arp.held.clear();
+    prevLatch = blockLatch;
+
     int n = buffer.getNumSamples();
     auto* L = buffer.getWritePointer (0);
     auto* R = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
-    std::vector<float> monoR (n, 0.0f);
-    float* Rp = R ? R : monoR.data();
+    if (R == nullptr && (int) monoScratch.size() < n) monoScratch.resize ((size_t) n); // host broke its block-size promise
+    float* Rp = R ? R : monoScratch.data();
 
-    // --- arpeggiator stepper (block-quantized) ---
-    bool arpOn = pv (apvts, "arp_on") > 0.5f;
-    if (prevArpOn && ! arpOn)
+    if (prevArpOn && ! blockArpOn)
     {
         // Arp switched off mid-pattern: ringing arp voices would otherwise
         // sustain forever (their EGs never see noteOff). Release them all.
         for (int t = 0; t < 2; ++t)
             for (auto& v : voices[t]) v.noteOff();
-        arp.currentNote = -1; arp.step = 0; arpOffCountdown = 0.0;
+        arp.currentNote = -1; arp.step = 0; arp.running = false; arpOffCountdown = 0.0;
     }
-    prevArpOn = arpOn;
-    if (! arpOn || heldNotes.empty()) arpOffCountdown = 0.0; // never cut manual notes
-    if (arpOn && ! heldNotes.empty())
-    {
-        static const double beats[6] = { 1.0, 0.5, 0.25, 1.0/3.0, 1.0/6.0, 0.125 };
-        int ri = juce::jlimit (0, 5, (int) pv (apvts, "arp_rate"));
-        double stepBeats = beats[ri];
-        double stepSec = 60.0 / juce::jmax (20.0, effBpm) * stepBeats;
-        int stepSamples = juce::jmax (32, (int) (stepSec * fs));
-        int mode = (int) pv (apvts, "arp_mode");
-        int octs = juce::jlimit (1, 4, (int) std::round (pv (apvts, "arp_octaves")));
-        // build pattern
-        std::vector<int> notes = heldNotes;
-        std::sort (notes.begin(), notes.end());
-        std::vector<int> pattern;
-        if (mode == 0) { for (int o = 0; o < octs; ++o) for (int x : notes) pattern.push_back (x + o * 12); }
-        else if (mode == 1) { for (int o = octs - 1; o >= 0; --o) for (int i = (int) notes.size() - 1; i >= 0; --i) pattern.push_back (notes[i] + o * 12); }
-        else if (mode == 2 || mode == 3)
-        {
-            std::vector<int> up; for (int o = 0; o < octs; ++o) for (int x : notes) up.push_back (x + o * 12);
-            pattern = up;
-            for (int i = (int) up.size() - 2; i > 0; --i) pattern.push_back (up[i]);
-            if (mode == 3) std::reverse (pattern.begin(), pattern.end());
-        }
-        else if (mode == 4) { pattern = notes; }
-        else { pattern = notes; } // trigger: chord
-        if (arp.step >= (int) pattern.size()) arp.step = 0;
-        // simple: advance one step per block if enough samples elapsed (approx via counter)
-        arp.nextStepSample -= n;
-        if (arp.nextStepSample <= 0)
-        {
-            arp.nextStepSample = stepSamples;
-            int idx = (mode == 4) ? (rand() % pattern.size()) : (arp.step % pattern.size());
-            int nn = juce::jlimit (0, 127, pattern[idx]);
-            if (mode == 5) // trigger chord
-            {
-                for (int t = 0; t < 2; ++t)
-                    for (auto& v : voices[t]) v.noteOff();
-                for (int x : notes)
-                    for (int t = 0; t < 2; ++t)
-                    {
-                        int vi = allocateVoice (t, x, polyBank[t]);
-                        voices[t][vi].noteOn (x, 0.9f, vp[t], false);
-                    }
-                arp.currentNote = -2;
-            }
-            else
-            {
-                if (arp.currentNote >= 0)
-                    for (int t = 0; t < 2; ++t)
-                        for (auto& v : voices[t])
-                            if (v.isActive() && v.getNote() == arp.currentNote) v.noteOff();
-                for (int t = 0; t < 2; ++t)
-                {
-                    int vi = allocateVoice (t, nn, polyBank[t]);
-                    voices[t][vi].noteOn (nn, 0.9f, vp[t], false);
-                }
-                arp.currentNote = nn;
-            }
-            arp.step++;
-            arpOffCountdown = stepSamples
-                * (double) juce::jlimit (0.05f, 1.0f, pv (apvts, "arp_gate"));
-        }
-    }
+    prevArpOn = blockArpOn;
 
+    // Per-block constants (hoisted out of the sample loop).
+    float mix = juce::jlimit (0.0f, 1.0f, pv (apvts, "tmix"));
+    const float t1 = std::cos (mix * 1.5707963f), t2 = std::sin (mix * 1.5707963f);
+    const float mc = (float) std::exp (-1.0 / (0.005 * fs));
+    const float wk = 1.0f - (float) std::exp (-1.0 / (0.008 * fs)); // wheel smoothing
+
+    // Sample-accurate MIDI + arp clock: events land on their own sample.
+    auto midiIt = midi.cbegin();
+    const auto midiEnd = midi.cend();
     for (int i = 0; i < n; ++i)
     {
-        if (arpOffCountdown > 0.0)
-        {
-            arpOffCountdown -= 1.0;
-            if (arpOffCountdown <= 0.0 && arp.currentNote != -1)
-            {
-                if (arp.currentNote == -2)
-                {
-                    for (int t = 0; t < 2; ++t)
-                        for (auto& v : voices[t]) v.noteOff();
-                }
-                else
-                    for (int t = 0; t < 2; ++t)
-                        for (auto& v : voices[t])
-                            if (v.isActive() && v.getNote() == arp.currentNote) v.noteOff();
-                arp.currentNote = -1;
-            }
-        }
+        for (; midiIt != midiEnd && (*midiIt).samplePosition <= i; ++midiIt)
+            handleMidi ((*midiIt).getMessage());
+        arpTick();
+        bendSm += (bendSemi - bendSm) * wk;
+        modSm += (modWheel - modSm) * wk;
+
         float s1l = 0, s1r = 0, s2l = 0, s2r = 0;
         for (int v = 0; v < MaxVoices; ++v)
         {
             if (voices[0][v].isActive())
             {
                 float vl, vr;
-                voices[0][v].renderSample (vp[0], bendSemi, modWheel, vl, vr);
+                voices[0][v].renderSample (blockVp[0], bendSm, modSm, vl, vr);
                 s1l += vl; s1r += vr;
             }
             if (voices[1][v].isActive())
             {
                 float vl, vr;
-                voices[1][v].renderSample (vp[1], bendSemi, modWheel, vl, vr);
+                voices[1][v].renderSample (blockVp[1], bendSm, modSm, vl, vr);
                 s2l += vl; s2r += vr;
             }
         }
         // timbre crossfade (smoothed): equal-power, 0 = T1, 1 = T2
-        float mix = juce::jlimit (0.0f, 1.0f, pv (apvts, "tmix"));
-        float t1 = std::cos (mix * 1.5707963f), t2 = std::sin (mix * 1.5707963f);
-        double mc = std::exp (-1.0 / (0.005 * fs));
-        tmixSm[0] = tmixSm[0] * (float) mc + t1 * (float) (1.0 - mc);
-        tmixSm[1] = tmixSm[1] * (float) mc + t2 * (float) (1.0 - mc);
+        tmixSm[0] = tmixSm[0] * mc + t1 * (1.0f - mc);
+        tmixSm[1] = tmixSm[1] * mc + t2 * (1.0f - mc);
         float sl = s1l * tmixSm[0] + s2l * tmixSm[1];
         float sr = s1r * tmixSm[0] + s2r * tmixSm[1];
         // gentle voice-bus normalize + soft saturation (tames high-reso peaks)
-        float ml = std::tanh (sl * 0.35f);
-        float mr = std::tanh (sr * 0.35f);
-        L[i] = ml;
-        Rp[i] = mr;
+        L[i] = std::tanh (sl * 0.35f);
+        Rp[i] = std::tanh (sr * 0.35f);
     }
+    for (; midiIt != midiEnd; ++midiIt) // stray events past the block end
+        handleMidi ((*midiIt).getMessage());
 
     // FX chain: modfx -> delay -> eq -> output level
     int mtype = (int) pv (apvts, "modfx_type");
@@ -554,7 +598,6 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     meterL.store (outSmoothL);
     meterR.store (outSmoothR);
     pushScopeData (L, Rp, n);
-    if (R == nullptr) buffer.copyFrom (1, 0, buffer, 0, 0, n);
 }
 
 void NanoFrogProcessor::setCurrentProgram (int index)
@@ -1089,9 +1132,9 @@ juce::String NanoFrogProcessor::getUserBankEntryName (int i) const
 
 void NanoFrogProcessor::pushScopeData (const float* L, const float* R, int n)
 {
-    int free = scopeFifo.getFreeSpace();
-    if (free < n) { scopeFifo.reset(); free = scopeFifo.getFreeSpace(); }
-    int m = std::min (n, free);
+    // Writer never resets the FIFO (that races the UI reader): when the UI
+    // isn't draining, newer samples are simply dropped.
+    int m = std::min (n, scopeFifo.getFreeSpace());
     if (m <= 0) return;
     int s1, size1, s2, size2;
     scopeFifo.prepareToWrite (m, s1, size1, s2, size2);

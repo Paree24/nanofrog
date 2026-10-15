@@ -230,9 +230,17 @@ private:
                 break;
             }
         }
+        // Band-limit: partials at/above Nyquist would alias (up to 15x the
+        // fundamental here). Fade them out over the last 10% below Nyquist so
+        // pitch sweeps never pop as a partial crosses the limit.
         float s = 0.0f;
         for (int k = 0; k < nP; ++k)
-            s += level[k] * std::sin (float (TAU * t * ratio[k] + ph[k]));
+        {
+            double pf = ratio[k] * inc; // partial frequency, cycles/sample
+            if (pf >= 0.5) continue;
+            float bl = pf > 0.45 ? float ((0.5 - pf) / 0.05) : 1.0f;
+            s += bl * level[k] * std::sin (float (TAU * t * ratio[k] + ph[k]));
+        }
         float pulse = (std::fmod (t + pwm * 0.5, 1.0) < 0.5 ? 1.0f : -1.0f);
         float folded = std::tanh (s * (1.0f + xmod * 2.0f));
         float out = folded * (1.0f - shape * 0.45f) + pulse * (shape * 0.25f);
@@ -288,9 +296,9 @@ inline float OscCore::sawMorph (double freq, float morph)
     {
         double t2 = t + t; if (t2 >= 1.0) t2 -= 1.0;
         double inc2 = inc * 2.0 > 0.4 ? 0.4 : inc * 2.0;
-        float s2 = float (2.0 * t2 - 1.0)
-                   - float (polyBlep (t, inc2))
-                   - float (polyBlep (std::fmod (t + 0.5, 1.0), inc2));
+        // The octave-up saw wraps at t2 = 0 (t = 0 and t = 0.5): one BLEP in
+        // its own phase/increment corrects both edges.
+        float s2 = float (2.0 * t2 - 1.0) - float (polyBlep (t2, inc2));
         out = s1 * (1.0f - morph) + s2 * morph * 0.9f;
     }
     advancePhase (inc);

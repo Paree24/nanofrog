@@ -38,6 +38,8 @@ public:
     juce::String getCurrentUserPreset() const { return currentUser; }
     // Drops the user name tag (e.g. its file was deleted); sound untouched.
     void forgetUserPreset() { currentUser.clear(); }
+    // A user file saved from the current sound becomes the current preset.
+    void markUserPreset (const juce::String& fileName) { currentPreset = -1; currentUser = fileName; }
     // One-click flavour re-roll (message thread only): jitters continuous
     // params a few percent, plus small musical steps on osc selectors.
     // Bass/keys/leads/percussive voices keep their envelopes (category
@@ -94,6 +96,9 @@ private:
     VoiceParams collectVoiceParams (int timbre);
     void handleMidi (const juce::MidiMessage& m);
     int allocateVoice (int timbre, int note, int poly);
+    void arpTick();          // per-sample arp clock (sample-accurate steps)
+    void arpFireStep();
+    void releaseArpNote();
     float egTimeFromKnob (float v01, float maxSec);
 
     static constexpr int MaxVoices = 8;
@@ -101,10 +106,21 @@ private:
     float tmixSm[2] = { 1.0f, 0.0f }; // equal-power T1/T2 crossfade gains
     // arp state
     struct ArpState {
-        bool active = false; int step = 0; double nextStepSample = 0;
-        std::vector<int> held; int currentNote = -1;
+        bool running = false; int step = 0;
+        double samplesToNext = 0.0; // countdown to the next step (fractional)
+        std::vector<int> held;      // latched notes (latch on)
+        std::vector<int> sorted, pattern; // scratch, reserved up front
+        int currentNote = -1;
     } arp;
     std::vector<int> heldNotes; // raw held (before arp)
+    // Per-block snapshot used by MIDI handling and rendering (no per-event
+    // parameter collection on the audio thread).
+    VoiceParams blockVp[2];
+    int blockPoly[2] = { 1, 1 };
+    bool blockArpOn = false, blockLatch = false, prevLatch = false;
+    float lastVel = 0.9f;
+    float bendSm = 0.0f, modSm = 0.0f; // smoothed wheels (LESSONS.md #14)
+    std::vector<float> monoScratch;    // right channel when the host gives mono
     int currentPreset = 0;
     double fs = 44100.0;
     float bendSemi = 0.0f, modWheel = 0.0f, sustainPedal = 0.0f;

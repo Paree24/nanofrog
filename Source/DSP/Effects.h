@@ -61,9 +61,11 @@ public:
             }
             else if (type == 2) // flanger: short base, antiphase sweep, feedback
             {
-                float sw = 0.3f + depth01 * 2.0f; // 0.3..2.3 ms
-                float wetL = readDelay (bufL, pos, 2.0f + sL * sw);
-                float wetR = readDelay (bufR, pos, 2.0f - sR * sw);
+                // base always exceeds the sweep, so the tap never reaches
+                // zero/negative delay (that read ~100 ms stale buffer data)
+                float sw = 0.3f + depth01 * 1.7f; // 0.3..2.0 ms
+                float wetL = readDelay (bufL, pos, 2.2f + sL * sw);
+                float wetR = readDelay (bufR, pos, 2.2f - sR * sw);
                 float fb = 0.3f + depth01 * 0.4f;
                 bufL[pos] = L[i] + wetL * fb * 0.7f;
                 bufR[pos] = R[i] + wetR * fb * 0.7f;
@@ -122,21 +124,26 @@ public:
         fs = sr;
         bufL.assign ((size_t) (sr * 2.5 + 16), 0.0f);
         bufR.assign ((size_t) (sr * 2.5 + 16), 0.0f);
-        pos = 0;
+        pos = 0; dsSm = -1.0;
     }
     void reset() { std::fill (bufL.begin(), bufL.end(), 0.0f); std::fill (bufR.begin(), bufR.end(), 0.0f); }
 
     // time01 0..1 -> 20..900ms, fb 0..0.85, mix 0..1
     void process (float* L, float* R, int n, int type, float time01, float fb, float mix)
     {
-        if (mix <= 0.001f) { return; }
+        // Always runs (mix 0 just outputs dry) so the line never holds stale
+        // echoes that would replay when the mix comes back up.
         float ms = 20.0f + time01 * time01 * 880.0f;
         double ds = ms * 0.001 * fs;
+        if (dsSm < 0.0) dsSm = ds;
+        // glide the read tap (tape-style) instead of jumping: no zipper clicks
+        const double tk = 1.0 - std::exp (-1.0 / (0.05 * fs));
         float f = std::min (0.85f, fb);
         for (int i = 0; i < n; ++i)
         {
-            float dL = readAt (bufL, pos, ds);
-            float dR = readAt (bufR, pos, ds);
+            dsSm += (ds - dsSm) * tk;
+            float dL = readAt (bufL, pos, dsSm);
+            float dR = readAt (bufR, pos, dsSm);
             float inL = L[i], inR = R[i];
             float wL, wR, nL, nR;
             if (type == 0)      { wL = dL; wR = dR; nL = inL + dL * f; nR = inR + dR * f; }
@@ -160,6 +167,7 @@ private:
         return b[i0] * (1 - fr) + b[i1] * fr;
     }
     double fs = 44100; std::vector<float> bufL, bufR; size_t pos = 0;
+    double dsSm = -1.0; // smoothed delay in samples (-1 = snap on first block)
 };
 
 // ---- 2-band EQ: lowshelf + highshelf (RBJ cookbook)
@@ -167,29 +175,32 @@ class TwoBandEq
 {
 public:
     void setSampleRate (double sr) { fs = sr; reset(); }
-    void reset() { x1L = x2L = y1L = y2L = x1H = x2H = y1H = y2H = 0; in1L = in2L = 0; in1H = in2H = 0; }
+    void reset()
+    {
+        for (auto& s : st)
+            for (auto& v : s) v = 0.0;
+    }
 
+    // Always filters: 0 dB shelves are identity, and skipping them left the
+    // biquad states stale (a click on re-engage).
     void process (float* L, float* R, int n, float lowDb, float highDb)
     {
-        if (lowDb == 0.0f && highDb == 0.0f) return;
         computeShelf (200.0, lowDb, true, bL, aL);
         computeShelf (6000.0, highDb, false, bH, aH);
         for (int i = 0; i < n; ++i)
         {
-            L[i] = biq (L[i], bL, aL, in1L, in2L, y1L, y2L);
-            L[i] = biq (L[i], bH, aH, in1H, in2H, y1H2L, y2H2L);
-            R[i] = biq (R[i], bL, aL, in1LR, in2LR, y1LR, y2LR);
-            R[i] = biq (R[i], bH, aH, in1HR, in2HR, y1HR, y2HR);
+            L[i] = biq (L[i], bL, aL, st[0]);
+            L[i] = biq (L[i], bH, aH, st[1]);
+            R[i] = biq (R[i], bL, aL, st[2]);
+            R[i] = biq (R[i], bH, aH, st[3]);
         }
     }
 
 private:
     double fs = 44100;
     double bL[3] = {1,0,0}, aL[3] = {1,0,0}, bH[3] = {1,0,0}, aH[3] = {1,0,0};
-    // per-channel state (L low, L high, R low, R high)
-    double in1L=0,in2L=0,y1L=0,y2L=0, in1H=0,in2H=0,y1H2L=0,y2H2L=0;
-    double in1LR=0,in2LR=0,y1LR=0,y2LR=0, in1HR=0,in2HR=0,y1HR=0,y2HR=0;
-    double x1L=0,x2L=0,y1Lc=0,y2Lc=0,x1H=0,x2H=0,y1H=0,y2H=0;
+    // biquad state {x1, x2, y1, y2}: L low, L high, R low, R high
+    double st[4][4] = {};
 
     void computeShelf (double fc, double db, bool low, double* b, double* a)
     {
@@ -202,8 +213,9 @@ private:
         else { b0=A*((A+1)+(A-1)*cw+2*std::sqrt(A)*alpha); b1=-2*A*((A-1)+(A+1)*cw); b2=A*((A+1)+(A-1)*cw-2*std::sqrt(A)*alpha); a0=(A+1)-(A-1)*cw+2*std::sqrt(A)*alpha; a1=2*((A-1)-(A+1)*cw); a2=(A+1)-(A-1)*cw-2*std::sqrt(A)*alpha; }
         b[0]=b0/a0; b[1]=b1/a0; b[2]=b2/a0; a[0]=1; a[1]=a1/a0; a[2]=a2/a0;
     }
-    static float biq (float x, double* b, double* a, double& x1, double& x2, double& y1, double& y2)
+    static float biq (float x, double* b, double* a, double* s)
     {
+        double& x1 = s[0]; double& x2 = s[1]; double& y1 = s[2]; double& y2 = s[3];
         double y = b[0]*x + b[1]*x1 + b[2]*x2 - a[1]*y1 - a[2]*y2;
         x2=x1; x1=x; y2=y1; y1=y;
         return float (y);

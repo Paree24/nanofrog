@@ -68,6 +68,8 @@ private:
     juce::TextButton folderBtn2 { "FOLDER" };
     juce::TextButton impBtnO2[2];
     juce::TextButton fldBtnO2[2];
+    juce::Label waveNameO2[2];          // OSC 2 user-wave readout per timbre
+    juce::Label* statusLabel = nullptr; // label currently showing an import status
     juce::String statusText;
     juce::uint32 statusHoldMs = 0;
     juce::AudioFormatManager formatManager;
@@ -111,7 +113,9 @@ private:
     void importWaveFile (int timbre, int osc);
     void importWaveFolder (int timbre, int osc);
     void selectUserWave (int timbre, int osc);
-    void showStatus (const juce::String& t);
+    void showStatus (const juce::String& t, int timbre, int osc);
+    juce::Label& waveLabelFor (int timbre, int osc);
+    void initWaveLabel (juce::Component* parent, juce::Label& lb);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FrogContent)
 };
