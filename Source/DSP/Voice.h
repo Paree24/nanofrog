@@ -67,7 +67,7 @@ public:
         active = false; note = -1; velocity = 0; fade = 1.0f;
         stealing = false; pendingNote = -1; stealGain = 0.0f;
         lfo1MulSm = lfo2MulSm = 0.0f; fmPhase = 0.0f;
-        curFreq1 = curFreq2 = 440.0; cutSm = 8000; ampSm = 1.0; panSmL = panSmR = 0.7f;
+        curFreq1 = curFreq2 = 440.0; cutSm = 8000; ampSm = 0.0; panSmL = panSmR = 0.7f;
         age = 0; randConst = (float) rand() / RAND_MAX * 2.0f - 1.0f;
     }
 
@@ -111,7 +111,10 @@ public:
     }
     bool isActive() const { return active && !eg2.isIdle(); }
     bool isAudible() const { return active && eg2.getLevel() > 0.0005f; }
-    int getNote() const { return note; }
+    // While a steal fade is running the voice already belongs to the pending
+    // note: note-offs and same-note reuse must match it, not the fading one
+    // (otherwise a short note landing inside the fade hangs forever).
+    int getNote() const { return (stealing && pendingNote >= 0) ? pendingNote : note; }
     float audibleLevel() const { return eg2.getLevel(); }
     void touchAge() { ++age; }
     long getAge() const { return age; }
@@ -276,8 +279,18 @@ public:
         // add only slow beating. Amount 0 gives fmMul == 1 (no FM).
         fmPhase += curFreq2 / fs;
         if (fmPhase >= 1.0) fmPhase -= 1.0;
-        double fmMul = std::pow (2.0, std::sin (6.283185307179586 * fmPhase)
-                                        * (double) p.fmAmt * 2.0);
+        // 2^(x sin) averages I0(x ln2) > 1, so raw exponential FM drags the
+        // carrier sharp (+150 cents at amount 0.45). Divide by that mean:
+        // pitch centre stays on the key and integer ratios stay harmonic.
+        double fmX = (double) p.fmAmt * 2.0;
+        double fmMul = 1.0;
+        if (fmX > 0.0)
+        {
+            double y = 0.25 * (fmX * 0.6931471805599453) * (fmX * 0.6931471805599453);
+            double term = 1.0, i0 = 1.0; // I0 series: sum y^k / (k!)^2
+            for (int k = 1; k < 10; ++k) { term *= y / (double) (k * k); i0 += term; }
+            fmMul = std::pow (2.0, std::sin (6.283185307179586 * fmPhase) * fmX) / i0;
+        }
         if (p.unison)
         {
             // two taps, symmetric detune around center (independent phases)

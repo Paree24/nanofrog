@@ -19,11 +19,167 @@ static bool rectInside (juce::Rectangle<int> inner, juce::Rectangle<int> outer)
     return outer.contains (inner);
 }
 
+// ---- audio feature dump (NANOFROG_DUMP_FEATURES=out.csv): renders every
+// factory preset (C4 held 1 s + 0.5 s release) and a MUTATE-ed copy, writes
+// 24 log-band spectra for attack/sustain/release + a 15-point RMS envelope.
+// Used to measure preset similarity by sound rather than by parameters.
+static std::vector<float> renderFeatures (NanoFrogProcessor& px)
+{
+    srand (1);
+    const int bs = 512, nBlocks = 130, offBlock = 86;
+    std::vector<float> mono;
+    juce::AudioBuffer<float> buf (2, bs);
+    for (int b = 0; b < nBlocks; ++b)
+    {
+        juce::MidiBuffer m;
+        if (b == 0) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        if (b == offBlock) m.addEvent (juce::MidiMessage::noteOff (1, 60), 0);
+        px.processBlock (buf, m);
+        for (int i = 0; i < bs; ++i) mono.push_back (0.5f * (buf.getSample (0, i) + buf.getSample (1, i)));
+    }
+    const int N = 2048, hop = 1024;
+    juce::dsp::FFT fft (11);
+    juce::dsp::WindowingFunction<float> win ((size_t) N, juce::dsp::WindowingFunction<float>::hann);
+    const int nb = 24;
+    double edges[nb + 1];
+    for (int k = 0; k <= nb; ++k) edges[k] = 40.0 * std::pow (16000.0 / 40.0, k / (double) nb);
+    double seg[3][nb] = {}; int segN[3] = {};
+    std::vector<float> fr ((size_t) N * 2);
+    for (int st = 0; st + N <= (int) mono.size(); st += hop)
+    {
+        double t = (st + N / 2) / 44100.0;
+        int sgi = t < 0.15 ? 0 : (t >= 0.3 && t < 1.0 ? 1 : (t >= 1.0 ? 2 : -1));
+        if (sgi < 0) continue;
+        std::fill (fr.begin(), fr.end(), 0.0f);
+        std::copy (mono.begin() + st, mono.begin() + st + N, fr.begin());
+        win.multiplyWithWindowingTable (fr.data(), (size_t) N);
+        fft.performFrequencyOnlyForwardTransform (fr.data());
+        for (int bin = 1; bin < N / 2; ++bin)
+        {
+            double f = bin * 44100.0 / N;
+            for (int k = 0; k < nb; ++k)
+                if (f >= edges[k] && f < edges[k + 1]) { seg[sgi][k] += (double) fr[(size_t) bin] * fr[(size_t) bin]; break; }
+        }
+        ++segN[sgi];
+    }
+    std::vector<float> out;
+    for (int sg = 0; sg < 3; ++sg)
+        for (int k = 0; k < nb; ++k)
+            out.push_back ((float) (10.0 * std::log10 (seg[sg][k] / juce::jmax (1, segN[sg]) + 1e-10)));
+    const int env = 15, len = (int) mono.size() / env;
+    for (int e = 0; e < env; ++e)
+    {
+        double a = 0;
+        for (int i = e * len; i < (e + 1) * len; ++i) a += (double) mono[(size_t) i] * mono[(size_t) i];
+        out.push_back ((float) (10.0 * std::log10 (a / len + 1e-10)));
+    }
+    return out;
+}
+
+static int dumpFeatures (const char* path)
+{
+    juce::File f (path);
+    f.deleteFile();
+    juce::FileOutputStream os (f);
+    int n = PresetBank::count();
+    for (int idx = 0; idx < n; ++idx)
+    {
+        for (int mut = 0; mut < 2; ++mut)
+        {
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
+            px->loadFactoryPreset (idx);
+            if (mut)
+            {
+                px->mutateCurrentPatch();
+                auto vals = PresetBank::capture (px->apvts);
+                px = std::make_unique<NanoFrogProcessor>(); // fresh voice state
+                px->prepareToPlay (44100.0, 512);
+                PresetBank::apply (px->apvts, vals);
+            }
+            auto feats = renderFeatures (*px);
+            const auto& pr = PresetBank::get (idx);
+            os << idx << "\t" << pr.name << "\t" << (pr.tags.isEmpty() ? "" : pr.tags[0]) << "\t" << mut;
+            for (auto v : feats) os << "\t" << juce::String (v, 2);
+            os << "\n";
+        }
+    }
+    printf ("features: %d presets -> %s\n", n, path);
+    return 0;
+}
+
+// ---- pitch dump (NANOFROG_DUMP_PITCH=out.tsv): every factory preset at
+// C3 and E4, 16k-point spectrum of 0.10-0.47 s, top spectral peaks (Hz, dB,
+// parabolic-interpolated) + RMS level. Verifies presets stay in key.
+static int dumpPitch (const char* path)
+{
+    juce::File f (path);
+    f.deleteFile();
+    juce::FileOutputStream os (f);
+    const int N = 16384, bs = 512;
+    juce::dsp::FFT fft (14);
+    juce::dsp::WindowingFunction<float> win ((size_t) N, juce::dsp::WindowingFunction<float>::hann);
+    int n = PresetBank::count();
+    for (int idx = 0; idx < n; ++idx)
+        for (int note : { 48, 64 })
+        {
+            srand (1);
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, bs);
+            px->loadFactoryPreset (idx);
+            std::vector<float> mono;
+            juce::AudioBuffer<float> buf (2, bs);
+            for (int b = 0; b < 48; ++b) // ~0.56 s held
+            {
+                juce::MidiBuffer m;
+                if (b == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+                px->processBlock (buf, m);
+                for (int i = 0; i < bs; ++i) mono.push_back (0.5f * (buf.getSample (0, i) + buf.getSample (1, i)));
+            }
+            const int st = 4410;
+            double rms = 0;
+            for (int i = st; i < st + N; ++i) rms += (double) mono[(size_t) i] * mono[(size_t) i];
+            rms = std::sqrt (rms / N);
+            std::vector<float> fr ((size_t) N * 2, 0.0f);
+            std::copy (mono.begin() + st, mono.begin() + st + N, fr.begin());
+            win.multiplyWithWindowingTable (fr.data(), (size_t) N);
+            fft.performFrequencyOnlyForwardTransform (fr.data());
+            std::vector<double> db ((size_t) N / 2);
+            double mx = -300;
+            for (int k = 0; k < N / 2; ++k) { db[(size_t) k] = 20.0 * std::log10 (fr[(size_t) k] + 1e-12); mx = std::max (mx, db[(size_t) k]); }
+            std::vector<std::pair<double, double>> peaks; // (dB, Hz)
+            for (int k = 2; k < N / 2 - 1; ++k)
+            {
+                double hz = k * 44100.0 / N;
+                if (hz < 25.0 || hz > 4000.0) continue;
+                if (db[(size_t) k] > db[(size_t) k - 1] && db[(size_t) k] >= db[(size_t) k + 1] && db[(size_t) k] > mx - 40.0)
+                {
+                    double a = db[(size_t) k - 1], b = db[(size_t) k], c = db[(size_t) k + 1];
+                    double off = 0.5 * (a - c) / (a - 2 * b + c);
+                    peaks.push_back ({ b - 0.25 * (a - c) * off, (k + off) * 44100.0 / N });
+                }
+            }
+            std::sort (peaks.begin(), peaks.end(), [] (auto& x, auto& y) { return x.first > y.first; });
+            const auto& pr = PresetBank::get (idx);
+            os << idx << "\t" << pr.name << "\t" << (pr.tags.isEmpty() ? "" : pr.tags[0]) << "\t" << note
+               << "\t" << juce::String (rms, 6);
+            for (size_t k = 0; k < std::min<size_t> (16, peaks.size()); ++k)
+                os << "\t" << juce::String (peaks[k].second, 3) << ":" << juce::String (peaks[k].first - mx, 1);
+            os << "\n";
+        }
+    printf ("pitch: %d presets -> %s\n", n, path);
+    return 0;
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     setvbuf (stdout, nullptr, _IONBF, 0); // unbuffered: CI logs survive crashes
     printf ("-- NanoFrog headless test --\n");
+    if (const char* dump = std::getenv ("NANOFROG_DUMP_FEATURES"))
+        return dumpFeatures (dump); // bank from NANOFROG_FACTORY_JSON as given
+    if (const char* dump = std::getenv ("NANOFROG_DUMP_PITCH"))
+        return dumpPitch (dump);
 
     // Point the bank at the repo JSON and user presets at a temp dir.
     {
@@ -88,6 +244,24 @@ int main()
         }
     };
     checkTree (ed, "content");
+    // sibling sections must never overlap (AMP once sat 14 px under EFFECTS)
+    std::function<void (juce::Component*)> checkOverlap = [&] (juce::Component* c)
+    {
+        std::vector<juce::Component*> groups;
+        for (int i = 0; i < c->getNumChildComponents(); ++i)
+        {
+            auto* g = c->getChildComponent (i);
+            if (dynamic_cast<juce::GroupComponent*> (g) != nullptr) groups.push_back (g);
+            else if (g->getNumChildComponents() > 0
+                     && dynamic_cast<juce::GroupComponent*> (g) == nullptr) checkOverlap (g);
+        }
+        for (size_t a = 0; a < groups.size(); ++a)
+            for (size_t b = a + 1; b < groups.size(); ++b)
+                CHECK (! groups[a]->getBounds().intersects (groups[b]->getBounds()),
+                       "sections '%s' and '%s' overlap",
+                       groups[a]->getName().toRawUTF8(), groups[b]->getName().toRawUTF8());
+    };
+    checkOverlap (ed);
     // pages + tabs (2 timbre pages; mix is a header knob)
     CHECK (ed->isPageVisible (0), "page 0 not visible initially");
     CHECK (! ed->isPageVisible (1), "page 1 visible initially");
@@ -481,6 +655,66 @@ int main()
         printf ("browser delete: ok (no crash, rows/files consistent)\n");
     }
 
+    // ---- drumsynth-style save: inline name, armed overwrite, factory shadows ----
+    {
+        auto* br = ed->getBrowser();
+        ed->openBrowser();
+        auto setCut = [&] (float v)
+        {
+            if (auto* p = proc->apvts.getParameter ("filter_cutoff"))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        auto rawCut = [&] { return proc->apvts.getRawParameterValue ("filter_cutoff")->load(); };
+        setCut (0.25f);
+        br->testSetName ("Save Twice");
+        br->testClickSave();
+        CHECK (PresetBank::userFileFor ("Save Twice").existsAsFile(), "inline save failed");
+        CHECK (proc->getCurrentUserPreset() == "Save Twice.nbpreset", "saved preset not current");
+        setCut (0.75f);
+        br->testSetName ("Save Twice");
+        br->testClickSave(); // existing name: arms only
+        CHECK (br->testOverwriteArmed(), "existing name did not arm OVERWRITE?");
+        CHECK ((int) PresetBank::scanUser().size() == 1, "armed save wrote a file");
+        br->testClickSave(); // confirm
+        CHECK (! br->testOverwriteArmed(), "overwrite stayed armed");
+        CHECK ((int) PresetBank::scanUser().size() == 1, "overwrite created a duplicate");
+        NanoPreset np;
+        PresetBank::readUser (PresetBank::userFileFor ("Save Twice"), np);
+        float savedCut = np.values[(size_t) (std::find_if (PresetBank::kParamIds,
+            PresetBank::kParamIds + PresetBank::kParamCount,
+            [] (const char* id) { return juce::String (id) == "filter_cutoff"; }) - PresetBank::kParamIds)];
+        CHECK (std::abs (savedCut - 0.75f) < 1e-3f, "overwrite kept old values (%.3f)", savedCut);
+        for (auto& u : PresetBank::scanUser()) PresetBank::deleteUser (u.file);
+
+        // factory overwrite -> shadow; reload gives new values; DEL restores
+        const int slot = 7;
+        float shippedCut = PresetBank::get (slot).values[0];
+        juce::ignoreUnused (shippedCut);
+        proc->loadFactoryPreset (slot);
+        float orig = rawCut();
+        setCut (orig < 0.5f ? 0.9f : 0.1f);
+        float edited = rawCut();
+        ed->closeBrowser(); ed->openBrowser();
+        br->testShowCategory ("All"); // save switched to User; factory rows first
+        br->selectRowSync (slot);
+        setCut (edited); // selecting reloaded the slot: re-apply the edit
+        CHECK (br->testOverwriteSelected(), "factory overwrite failed");
+        CHECK (PresetBank::get (slot).shadowed, "factory slot not shadowed");
+        CHECK (PresetBank::factoryShadowDir().findChildFiles (juce::File::findFiles, false).size() == 1,
+               "shadow file not written");
+        setCut (orig);
+        proc->loadFactoryPreset (slot);
+        CHECK (std::abs (rawCut() - edited) < 1e-3f, "shadowed slot did not load the overwrite");
+        br->selectRowSync (slot);
+        CHECK (br->testDeleteSelected(), "factory restore failed");
+        CHECK (! PresetBank::get (slot).shadowed, "slot still shadowed after DEL");
+        proc->loadFactoryPreset (slot);
+        CHECK (std::abs (rawCut() - orig) < 1e-3f, "DEL did not restore shipped values");
+        CHECK (PresetBank::count() == nProg, "shadowing changed the program count");
+        ed->closeBrowser();
+        printf ("inline save / armed overwrite / factory shadow+restore: ok\n");
+    }
+
     // Drive everything needing the message loop from inside ONE dispatch run
     // (runDispatchLoop is one-shot): preset changes, then folder/state test.
     struct ProgDriver : juce::Timer
@@ -650,6 +884,95 @@ int main()
         printf ("arp-off release: ok (tail %.2e)\n", tail);
     }
 
+    // ---- arp latch keeps playing after release; swing reshapes the grid;
+    //      steps are sample-accurate (not block-quantized) ----
+    {
+        auto onsets = [&] (bool latch, float swing, std::vector<int>& out, double& lateEnergy)
+        {
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
+            auto setP = [&] (const char* id, float v)
+            {
+                if (auto* p = px->apvts.getParameter (id))
+                    p->setValueNotifyingHost (p->convertTo0to1 (v));
+            };
+            setP ("arp_on", 1.0f);
+            setP ("arp_latch", latch ? 1.0f : 0.0f);
+            setP ("arp_rate", 2.0f); // 1/16 @120 = 5512.5 samples
+            setP ("arp_gate", 0.3f);
+            setP ("arp_swing", swing);
+            setP ("song_tempo", 120.0f);
+            setP ("env2_r", 0.0f);
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::MidiBuffer on, off, none;
+            on.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 100);
+            off.addEvent (juce::MidiMessage::noteOff (1, 60), 0);
+            bool prevLoud = false; long t = 0; float env = 0.0f;
+            lateEnergy = 0.0;
+            for (int b = 0; b < 120; ++b)
+            {
+                px->processBlock (buf, b == 0 ? on : (b == 30 ? off : none));
+                for (int i = 0; i < 512; ++i, ++t)
+                {
+                    float a = std::abs (buf.getSample (0, i));
+                    env = std::max (a, env * 0.995f); // peak follower (~5 ms)
+                    bool loud = prevLoud ? env > 2e-3f : env > 2e-2f; // hysteresis
+                    if (loud && ! prevLoud) out.push_back ((int) t);
+                    prevLoud = loud;
+                    if (b >= 80) lateEnergy += a * a;
+                }
+            }
+        };
+        std::vector<int> o1, o2, o3; double e1, e2, e3;
+        onsets (false, 0.0f, o1, e1);
+        onsets (true, 0.0f, o2, e2);
+        onsets (true, 0.6f, o3, e3);
+        CHECK (e1 < 1e-8, "arp kept playing after release without latch (%.3e)", e1);
+        CHECK (e2 > 1e-4, "latched arp stopped after key release (%.3e)", e2);
+        // key lands at sample 100; the detector trips ~100 samples into the
+        // attack. Block-quantized stepping would put it at >= 512.
+        CHECK (! o2.empty() && o2[0] >= 100 && o2[0] < 300,
+               "first arp step not on the key press (onset %d, want 100..300)", o2.empty() ? -1 : o2[0]);
+        // Detector jitter is ~+-100 samples (waveform phase at onset);
+        // block-quantized stepping would be off by up to a whole 512 block.
+        bool evenGrid = o2.size() > 5
+            && std::abs ((o2[5] - o2[0]) / 5.0 - 5512.5) < 40.0;
+        for (size_t k = 1; evenGrid && k < 6; ++k)
+            evenGrid = std::abs ((o2[k] - o2[k - 1]) - 5512) < 150;
+        CHECK (evenGrid, "straight arp steps not on the 5512-sample grid");
+        bool swung = o3.size() > 3
+            && (o3[1] - o3[0]) > (o3[2] - o3[1]) + 2000;
+        CHECK (swung, "arp swing had no effect");
+        printf ("arp latch/swing/timing: ok (%d / %d onsets)\n", (int) o2.size(), (int) o3.size());
+    }
+
+    // ---- short note inside a voice-steal fade must not hang ----
+    {
+        auto px = std::make_unique<NanoFrogProcessor>();
+        px->prepareToPlay (44100.0, 512);
+        auto setP = [&] (const char* id, float v)
+        {
+            if (auto* p = px->apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        setP ("voice_poly", 1.0f);
+        setP ("env2_r", 0.0f);
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer a, b, none;
+        a.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        b.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 10);
+        b.addEvent (juce::MidiMessage::noteOff (1, 64), 30); // inside the 2.5 ms fade
+        b.addEvent (juce::MidiMessage::noteOff (1, 60), 40);
+        px->processBlock (buf, a);
+        px->processBlock (buf, a);
+        px->processBlock (buf, b);
+        for (int k = 0; k < 100; ++k) px->processBlock (buf, none);
+        double tail = 0;
+        for (int i = 0; i < 512; ++i) tail += buf.getSample (0, i) * buf.getSample (0, i);
+        CHECK (tail < 1e-8, "note released during steal fade hung (energy %.3e)", tail);
+        printf ("steal-fade note-off: ok\n");
+    }
+
     // ---- digital selector routes by index in both wave modes ----
     {
         float src[4096];
@@ -747,6 +1070,92 @@ int main()
         CHECK (on <= 1.0f, "limiter ceiling breached (%.3f)", on);
         CHECK (on < off, "limiter did not engage (%.3f vs %.3f)", on, off);
         printf ("limiter: off=%.3f on=%.3f\n", off, on);
+    }
+
+    // ---- in-key invariant: no factory oscillator more than 25 cents off the
+    // played key (or its 4th/5th/octave). Covers every detune path: fine,
+    // Detune spread (+-15c*d), mono unison taps (+-25c*d), triangle Shape
+    // retune (+19 st, LFO1 via PWM), ring/FM off-octave ratios, vibrato. ----
+    {
+        auto idxOf = [] (const juce::String& id)
+        {
+            for (int k = 0; k < PresetBank::kParamCount; ++k)
+                if (id == PresetBank::kParamIds[k]) return k;
+            return -1;
+        };
+        int bad = 0; double worstAll = 0.0;
+        for (int idx = 0; idx < nProg; ++idx)
+        {
+            const auto& pr = PresetBank::get (idx);
+            auto g = [&] (const juce::String& id) { return pr.values[(size_t) idxOf (id)]; };
+            double worst = std::abs (g ("master_tune"));
+            for (juce::String pre : { juce::String(), juce::String ("t2_") })
+            {
+                if (pre.isNotEmpty() && g ("tmix") <= 0.0f) continue;
+                double det = g (pre + "voice_detune");
+                bool uni = (int) std::round (g (pre + "voice_poly")) == 1 && det > 0.01;
+                bool ringFm = ((int) g (pre + "osc_mod") % 2 == 1) || g (pre + "fm_amt") > 0.0f;
+                for (int o = 0; o < 2; ++o)
+                {
+                    juce::String os = pre + (o == 0 ? "osc1" : "osc2");
+                    bool audible = g (os + "_level") * g (pre + (o == 0 ? "mix_o1" : "mix_o2")) > 0.0f
+                                   || (o == 1 && ringFm);
+                    if (! audible || (int) g (os + "_wave") == 5) continue; // noise: no pitch
+                    double c = std::abs (g (os + "_fine") + (o == 0 ? -15.0 : 15.0) * det)
+                               + (uni ? 25.0 * det : 0.0);
+                    int semis = ((int) std::round (g (os + "_pitch")) % 12 + 12) % 12;
+                    if (semis != 0 && semis != 5 && semis != 7) c += 100.0;
+                    if (o == 1 && ringFm && semis != 0) c += 100.0;
+                    if ((int) g (os + "_wave") == 2
+                        && (g (os + "_shape") > 0.0f || g (os + "_pwm") > 0.0f)) c += 100.0;
+                    worst = std::max (worst, c);
+                }
+                double vib = 0.02 * g (pre + "voice_vib") * g (pre + "lfo2_depth");
+                worst = std::max (worst, 1200.0 * std::log2 (1.0 + vib));
+            }
+            worstAll = std::max (worstAll, worst);
+            if (worst > 25.0 && ++bad <= 5)
+                printf ("  off-key preset %d (%s): %.1f cents\n", idx, pr.name.toRawUTF8(), worst);
+        }
+        CHECK (bad == 0, "%d factory presets can sound > 25 cents off key", bad);
+        printf ("in-key bank: ok (worst oscillator %.1f cents)\n", worstAll);
+    }
+
+    // ---- FM keeps the pitch centre (exponential FM used to drag sharp) ----
+    {
+        auto fmPitch = [&] (float amt)
+        {
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
+            auto setP = [&] (const char* id, float v)
+            {
+                if (auto* p = px->apvts.getParameter (id))
+                    p->setValueNotifyingHost (p->convertTo0to1 (v));
+            };
+            setP ("osc1_wave", 3.0f); setP ("fm_amt", amt); // sine carrier, osc2 = modulator
+            setP ("osc2_level", 0.0f); setP ("mix_o2", 0.0f);
+            juce::MidiBuffer on; on.addEvent (juce::MidiMessage::noteOn (1, 57, (juce::uint8) 100), 0);
+            juce::MidiBuffer none;
+            juce::AudioBuffer<float> buf (2, 512);
+            std::vector<float> x;
+            for (int b = 0; b < 40; ++b)
+            {
+                px->processBlock (buf, b == 0 ? on : none);
+                if (b >= 8) for (int i = 0; i < 512; ++i) x.push_back (buf.getSample (0, i));
+            }
+            // autocorrelation peak near the A3 period (220 Hz) = pitch centre
+            int bestLag = 0; double best = -1e9;
+            for (int lag = 150; lag < 260; ++lag)
+            {
+                double acc = 0;
+                for (size_t i = 0; i + (size_t) lag < x.size(); ++i) acc += x[i] * x[i + (size_t) lag];
+                if (acc > best) { best = acc; bestLag = lag; }
+            }
+            return 1200.0 * std::log2 ((44100.0 / bestLag) / 220.0);
+        };
+        double c0 = fmPitch (0.0f), c45 = fmPitch (0.45f);
+        CHECK (std::abs (c45 - c0) < 12.0, "FM moved the pitch centre by %.1f cents", c45 - c0);
+        printf ("fm pitch centre: ok (%.1f -> %.1f cents)\n", c0, c45);
     }
 
     // ---- audibility audit: every pitched factory preset must speak ----

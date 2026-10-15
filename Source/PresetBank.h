@@ -15,6 +15,7 @@ struct NanoPreset
     juce::String name;
     std::vector<float> values; // kParamIds order
     juce::StringArray tags;
+    bool shadowed = false; // factory slot overwritten by the user (see overwriteFactory)
 };
 
 namespace PresetBank
@@ -54,6 +55,18 @@ namespace PresetBank
                         const juce::StringArray& tags);
     bool deleteUser (const juce::File& file);
     bool readUser (const juce::File& file, NanoPreset& out);
+    // The file SAVE would write for this name (it may already exist).
+    juce::File userFileFor (const juce::String& name);
+
+    // Factory overwrites (drumsynth model): the shipped bank is never
+    // modified. OVER on a factory slot writes a shadow copy to
+    // <userDir>/Factory/NNN Name.nbpreset that replaces the slot's values
+    // from then on (row marked '*'); restoreFactory deletes the shadow and
+    // brings back the shipped values.
+    juce::File factoryShadowDir();
+    bool overwriteFactory (int index, const std::vector<float>& values);
+    bool restoreFactory (int index); // true if a shadow existed
+    void rescanShadows();
 
     // APVTS glue (canonical order = kParamIds)
     std::vector<float> capture (juce::AudioProcessorValueTreeState& apvts);

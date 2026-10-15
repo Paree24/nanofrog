@@ -48,45 +48,27 @@ PresetBrowser::PresetBrowser (NanoFrogProcessor& p)
     nameCap.setText ("NAME", juce::dontSendNotification);
     nameCap.setJustificationType (juce::Justification::centredLeft);
     nameCap.setColour (juce::Label::textColourId, NanoColors::dim);
-    nameCap.setFont (look.uiFont (13.0f));
+    setOwnFont (nameCap, look.uiFont (13.0f));
     addAndMakeVisible (nameCap);
     nameBox.setColour (juce::TextEditor::backgroundColourId, NanoColors::comboBg);
     nameBox.setColour (juce::TextEditor::textColourId, NanoColors::text);
     nameBox.setColour (juce::TextEditor::outlineColourId, NanoColors::border);
     nameBox.setColour (juce::TextEditor::focusedOutlineColourId, NanoColors::accent);
     nameBox.setFont (look.uiFont (14.0f));
-    nameBox.setText (nextDefaultName(), false);
-    nameBox.selectAll();
+    nameBox.setTextToShowWhenEmpty ("Preset name...", NanoColors::dim.withAlpha (0.7f));
+    nameBox.onTextChange = [this] { setOverwriteArmed (false); }; // edited name: disarm
+    nameBox.onReturnKey = [this] { clickSave(); };
     addAndMakeVisible (nameBox);
 
     closeBtn.onClick = [&] { if (onClose) onClose(); };
-    saveBtn.onClick = [&]
-    {
-        juce::String name = nameBox.getText().trim();
-        if (name.isEmpty()) name = nextDefaultName();
-        juce::StringArray tags { "User", saveCat.getText() };
-        juce::File saved = PresetBank::saveUser (name, tags,
-                                                PresetBank::capture (proc.apvts));
-        if (saved.existsAsFile())
-        {
-            activeCat = "User";
-            refreshCatButtons();
-            rebuildRows();
-            nameBox.setText (nextDefaultName(), false);
-            nameBox.selectAll();
-            currentUserFile = saved.getFileName();
-            showStatus ("Saved '" + name + "'");
-            if (onPresetChanged) onPresetChanged();
-        }
-        else showStatus ("Save failed");
-    };
+    saveBtn.onClick = [&] { clickSave(); };
     overBtn.onClick = [&] { overwriteSelectedRow(); };
     delBtn.onClick = [&] { deleteSelectedRow(); };
     for (auto* b : { &saveBtn, &overBtn, &delBtn }) addAndMakeVisible (b);
     addAndMakeVisible (closeBtn);
     addAndMakeVisible (status);
     status.setColour (juce::Label::textColourId, NanoColors::dim);
-    status.setFont (look.uiFont (12.0f));
+    setOwnFont (status, look.uiFont (12.0f));
     status.setJustificationType (juce::Justification::centredLeft);
     rebuildRows();
 }
@@ -95,21 +77,61 @@ void PresetBrowser::visibilityChanged()
 {
     if (isVisible())
     {
+        PresetBank::rescanShadows(); // pick up shadows written elsewhere
         currentFactory = proc.getCurrentProgram();
         currentUserFile = proc.getCurrentUserPreset();
-        nameBox.setText (nextDefaultName(), false);
+        nameBox.setText (currentPresetName(), false); // prefill: current sound's name
+        setOverwriteArmed (false);
         rebuildRows();
         search.grabKeyboardFocus();
     }
 }
 
-juce::String PresetBrowser::nextDefaultName()
+juce::String PresetBrowser::currentPresetName() const
 {
-    std::set<juce::String> taken;
-    for (auto& u : PresetBank::scanUser()) taken.insert (u.name);
-    int n = 1;
-    while (taken.count ("My Preset " + juce::String (n)) > 0) ++n;
-    return "My Preset " + juce::String (n);
+    juce::String u = proc.getCurrentUserPreset();
+    if (u.isNotEmpty()) return u.upToLastOccurrenceOf (".nbpreset", false, true);
+    int f = proc.getCurrentProgram();
+    if (f > 0 && f < PresetBank::count()) return PresetBank::get (f).name; // never prefill "Init"
+    return {};
+}
+
+// SAVE (inline, no pop-up): saves under the name field. An existing user
+// preset needs a second click ("OVERWRITE?"); editing the name disarms it.
+void PresetBrowser::clickSave()
+{
+    juce::String name = nameBox.getText().trim();
+    if (name.isEmpty()) { nameBox.grabKeyboardFocus(); showStatus ("Type a name first"); return; }
+    juce::File target = PresetBank::userFileFor (name);
+    bool exists = target.existsAsFile();
+    if (exists && ! overwriteArmed)
+    {
+        setOverwriteArmed (true);
+        showStatus ("'" + name + "' exists: click again to overwrite");
+        return;
+    }
+    setOverwriteArmed (false);
+    juce::StringArray tags { "User", saveCat.getText() };
+    auto values = PresetBank::capture (proc.apvts);
+    juce::File saved = exists ? (PresetBank::overwriteUser (target, values, tags) ? target : juce::File())
+                              : PresetBank::saveUser (name, tags, values);
+    if (! saved.existsAsFile()) { showStatus ("Save failed"); return; }
+    proc.markUserPreset (saved.getFileName()); // the saved file is now the current sound
+    currentFactory = -1;
+    currentUserFile = saved.getFileName();
+    activeCat = "User";
+    search.setText ({}, false);
+    refreshCatButtons();
+    rebuildRows();
+    showStatus ((exists ? "Overwrote '" : "Saved '") + name + "'");
+    if (onPresetChanged) onPresetChanged();
+}
+
+void PresetBrowser::setOverwriteArmed (bool on)
+{
+    overwriteArmed = on;
+    saveBtn.setButtonText (on ? "OVERWRITE?" : "SAVE");
+    saveBtn.setToggleState (on, juce::dontSendNotification); // lit while armed
 }
 
 void PresetBrowser::refreshCatButtons()
@@ -117,8 +139,8 @@ void PresetBrowser::refreshCatButtons()
     for (auto& b : catBtns)
     {
         bool on = (b->getProperties()["cat"].toString() == activeCat);
-        b->setColour (juce::TextButton::textColourOffId,
-                      on ? NanoColors::accentHi : NanoColors::dim);
+        b->setToggleState (on, juce::dontSendNotification); // lit like other active buttons
+        b->setColour (juce::TextButton::textColourOffId, NanoColors::dim);
     }
 }
 
@@ -150,7 +172,8 @@ juce::String PresetBrowser::rowName (int r) const
     int id = rows[(size_t) r];
     if (PresetBank::isUserRow (id))
         return users[(size_t) PresetBank::userRowIndex (id)].name;
-    return PresetBank::get (id).name;
+    const auto& pr = PresetBank::get (id);
+    return pr.shadowed ? pr.name + " *" : pr.name; // '*' = user-overwritten slot
 }
 
 juce::String PresetBrowser::rowTags (int r) const
@@ -191,7 +214,20 @@ bool PresetBrowser::overwriteSelectedRow()
     int r = list.getSelectedRow();
     if (r < 0 || r >= (int) rows.size()) { showStatus ("Select a user preset"); return false; }
     int id = rows[(size_t) r];
-    if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return false; }
+    if (! PresetBank::isUserRow (id))
+    {
+        // Factory slot: write a shadow copy (shipped bank untouched, DEL restores).
+        juce::String fname = PresetBank::get (id).name;
+        if (PresetBank::overwriteFactory (id, PresetBank::capture (proc.apvts)))
+        {
+            rebuildRows();
+            showStatus ("Overwrote factory '" + fname + "' (DEL restores)");
+            if (onPresetChanged) onPresetChanged();
+            return true;
+        }
+        showStatus ("Overwrite failed");
+        return false;
+    }
     // Copy out first: rebuildRows() below replaces the users vector.
     juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
     juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
@@ -212,7 +248,20 @@ bool PresetBrowser::deleteSelectedRow()
     int r = list.getSelectedRow();
     if (r < 0 || r >= (int) rows.size()) return false;
     int id = rows[(size_t) r];
-    if (! PresetBank::isUserRow (id)) { showStatus ("Factory presets are read-only"); return false; }
+    if (! PresetBank::isUserRow (id))
+    {
+        // Factory slot: DEL only removes a user overwrite (restores shipped).
+        juce::String fname = PresetBank::get (id).name;
+        if (PresetBank::restoreFactory (id))
+        {
+            rebuildRows();
+            showStatus ("Restored factory '" + fname + "'");
+            if (onPresetChanged) onPresetChanged();
+            return true;
+        }
+        showStatus ("Factory presets can't be deleted");
+        return false;
+    }
     // Copy out first: rebuildRows() below replaces the users vector.
     juce::File ufile = users[(size_t) PresetBank::userRowIndex (id)].file;
     juce::String uname = users[(size_t) PresetBank::userRowIndex (id)].name;
@@ -307,8 +356,8 @@ void PresetBrowser::resized()
     for (int b = 0; b < nb; ++b)
         catBtns[(size_t) b]->setBounds (panel.getX() + 16 + b * (bw + 6),
                                         panel.getY() + 82, bw, 24);
-    list.setBounds (panel.getX() + 16, panel.getY() + 114,
-                    panel.getWidth() - 32, panel.getHeight() - 114 - 86);
+    int listH = (panel.getHeight() - 114 - 86) / 26 * 26; // whole rows only
+    list.setBounds (panel.getX() + 16, panel.getY() + 114, panel.getWidth() - 32, listH);
     nameCap.setBounds (panel.getX() + 16, panel.getBottom() - 72, 52, 26);
     nameBox.setBounds (panel.getX() + 74, panel.getBottom() - 72,
                        panel.getWidth() - 74 - 16, 26);

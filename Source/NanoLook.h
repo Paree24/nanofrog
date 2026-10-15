@@ -22,6 +22,14 @@ struct NanoColors
     static inline const juce::Colour knobBody { 0xff232326 };
 };
 
+// Labels keep the look's 13 px UI font unless given their own font through
+// this helper (a bare Label::setFont is overridden by getLabelFont).
+inline void setOwnFont (juce::Label& l, const juce::Font& f)
+{
+    l.getProperties().set ("ownFont", true);
+    l.setFont (f);
+}
+
 struct NanoLook : juce::LookAndFeel_V4
 {
     NanoLook()
@@ -55,7 +63,11 @@ struct NanoLook : juce::LookAndFeel_V4
         return titleFont (h);
     }
 
-    juce::Font getLabelFont (juce::Label&) override { return uiFont (13.0f); }
+    juce::Font getLabelFont (juce::Label& l) override
+    {
+        if (l.getProperties().contains ("ownFont")) return l.getFont();
+        return uiFont (13.0f);
+    }
     juce::Font getComboBoxFont (juce::ComboBox&) override { return uiFont (14.0f); }
     juce::Font getPopupMenuFont() override { return uiFont (14.0f); }
     juce::Font getTextButtonFont (juce::TextButton&, int) override { return titleFont (13.5f); }
@@ -167,10 +179,22 @@ struct NanoLook : juce::LookAndFeel_V4
         else if (active)         g.setColour (NanoColors::accent);
         else                     g.setColour (hover ? NanoColors::accent.withAlpha (0.6f) : NanoColors::border);
         g.drawRoundedRectangle (0.5f, 0.5f, w - 1, h - 1, 3.0f, 1.0f);
-        g.setColour (active && red ? juce::Colour (0xff101010)
-                                  : active ? NanoColors::accent : NanoColors::text);
+    }
+
+    // Text is drawn here only (drawing it in the background too painted it
+    // twice and hid any per-button textColourOffId, LESSONS.md #6 again).
+    void drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool) override
+    {
+        bool active = b.getToggleState();
+        bool red = (bool) b.getProperties().getWithDefault ("segRed", false);
+        juce::Colour c = NanoColors::text;
+        if (active && red)   c = juce::Colour (0xff101010);
+        else if (active)     c = NanoColors::accent;
+        else if (b.isColourSpecified (juce::TextButton::textColourOffId))
+            c = b.findColour (juce::TextButton::textColourOffId);
+        g.setColour (b.isEnabled() ? c : c.withAlpha (0.4f));
         g.setFont (titleFont (13.0f));
-        g.drawText (b.getButtonText(), 2, 0, (int) w - 4, (int) h,
+        g.drawText (b.getButtonText(), 2, 0, b.getWidth() - 4, b.getHeight(),
                     juce::Justification::centred, true);
     }
 
@@ -231,8 +255,11 @@ struct NanoLook : juce::LookAndFeel_V4
         auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h);
         g.setColour (NanoColors::track);
         g.fillRoundedRectangle (r, 2.0f);
+        // pos is the thumb's pixel position, not a 0..1 proportion
         g.setColour (NanoColors::accent);
-        g.fillRoundedRectangle (r.getX(), r.getY(), r.getWidth() * pos, r.getHeight(), 2.0f);
+        g.fillRoundedRectangle (r.getX(), r.getY(),
+                                juce::jlimit (0.0f, r.getWidth(), pos - r.getX()),
+                                r.getHeight(), 2.0f);
     }
 
 private:

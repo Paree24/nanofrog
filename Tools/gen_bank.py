@@ -1169,8 +1169,418 @@ for n in names:
     assert re.match(r"^[A-Za-z0-9 .'\-]+$", n), f"bad chars: {n!r}"
 
 
-def build_one(idx, rng):
+# ------------------------------------------------------------------ diversity
+# Every preset must sound like its own patch, not a re-roll of a neighbour.
+# Each candidate = recipe (fresh randomness) + a few category-aware,
+# musically bounded VARIATION MOVES; it is accepted only if it is far from
+# every preset accepted before it (distance below). Moves never touch what
+# defines a recipe (PROTECT), and the no-drift invariants still hold.
+
+MOVABLE_T = ["osc1_shape", "osc1_pwm", "osc1_xmod", "osc1_digital", "osc1_wave",
+             "osc2_wave", "osc2_octave", "osc2_pitch", "osc2_fine", "osc2_level",
+             "osc2_shape", "osc2_pwm", "osc2_xmod", "osc2_digital", "mix_o2",
+             "mix_noise", "fm_amt", "osc_mod", "filter_type", "filter_cutoff",
+             "filter_reso", "filter_keytrack", "filter_envamt", "amp_velocity",
+             "amp_dist", "amp_drive", "env1_a", "env1_d", "env1_s", "env1_r",
+             "env2_a", "env2_d", "env2_s", "env2_r", "lfo2_wave", "lfo2_rate",
+             "lfo2_depth", "lfo2_sync", "mod3_src", "mod3_dst", "mod3_amt",
+             "mod4_src", "mod4_dst", "mod4_amt"]
+
+# Recipe identity: keys a variation move may never change.
+_PITCH_ID = ["osc1_wave", "osc1_octave", "osc1_pitch"]
+PROTECT = {
+    "r_init": "*", "r_init_lead": "*",
+    "r_sub": _PITCH_ID + ["osc_mod", "fm_amt"],
+    "r_kick808": _PITCH_ID + ["env2_a", "env2_s", "osc_mod"],
+    "r_acid": ["osc1_wave", "osc1_octave"],
+    "r_reese": ["osc1_wave", "osc2_wave", "osc2_fine", "osc2_octave", "osc2_pitch", "osc_mod"],
+    "r_wobble": ["lfo1_wave", "lfo1_sync", "lfo1_depth", "mod1_src", "mod1_dst", "mod1_amt"],
+    "r_growl": ["osc1_wave", "lfo1_wave", "lfo1_rate", "lfo1_depth",
+                "mod1_src", "mod1_dst", "mod1_amt", "mod2_src", "mod2_dst", "mod2_amt"],
+    "r_lead_sync": ["osc_mod", "osc1_wave"],
+    "r_lead_square": ["osc1_wave"],
+    "r_lead_saw": ["osc1_wave"],
+    "r_lead_vox": ["osc1_wave", "mod1_src", "mod1_dst", "mod1_amt"],
+    "r_pad_fifth": ["osc2_pitch", "osc2_octave"],
+    "r_pad_pulse": ["osc1_wave", "osc2_wave", "osc2_pitch", "osc2_octave"],
+    "r_pad_air": ["filter_type", "lfo2_depth", "mod3_amt", "mod4_amt"],  # no LFO motion
+    "r_pad_voxpad": ["osc1_wave", "lfo2_depth", "mod3_amt", "mod4_amt"],  # fixed vowel
+    "r_pad_glass": ["osc1_wave"],
+    "r_choir": ["osc1_wave"],
+    "r_riser": ["filter_cutoff", "filter_envamt", "env1_a", "env1_s", "env2_a",
+                "filter_type", "osc_mod"],
+    "r_organ": ["osc1_wave", "env2_s"],
+}
+
+# Category envelopes of taste: (lo, hi) bounds moves draw from.
+CAT = {
+    "Bass":  dict(cut=(0.18, 0.62), reso=(0.0, 0.7), envamt=(0.15, 0.75), drive=(0.1, 0.7),
+                  noise=(0.0, 0.12), o2int=[(0, 0), (0, 0), (1, 0), (0, 7), (1, 7)],
+                  o2w=[W_SAW, W_SQR, W_TRI, W_SIN, W_DIG], fx=0.15, dly=0.12, lfo=0.45,
+                  ftypes=[F_LP24, F_LP24, F_LP12]),
+    "Lead":  dict(cut=(0.45, 0.95), reso=(0.05, 0.45), envamt=(0.1, 0.6), drive=(0.0, 0.55),
+                  noise=(0.0, 0.1), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7), (0, 5), (1, 7)],
+                  o2w=[W_SAW, W_SQR, W_TRI, W_DIG], fx=0.6, dly=0.7, lfo=0.6,
+                  ftypes=[F_LP24, F_LP12, F_LP12]),
+    "Pad":   dict(cut=(0.3, 0.8), reso=(0.0, 0.35), envamt=(0.05, 0.5), drive=(0.0, 0.25),
+                  noise=(0.0, 0.18), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7), (0, 5), (1, 7)],
+                  o2w=[W_SAW, W_SQR, W_TRI, W_SIN, W_DIG], fx=0.85, dly=0.8, lfo=0.75,
+                  ftypes=[F_LP24, F_LP12, F_LP12, F_BP12]),
+    "Arp":   dict(cut=(0.4, 0.9), reso=(0.05, 0.55), envamt=(0.15, 0.7), drive=(0.0, 0.45),
+                  noise=(0.0, 0.08), o2int=[(0, 0), (1, 0), (0, 7), (1, 7), (0, 5)],
+                  o2w=[W_SAW, W_SQR, W_TRI, W_DIG], fx=0.5, dly=0.85, lfo=0.5,
+                  ftypes=[F_LP24, F_LP12, F_BP12]),
+    "Keys":  dict(cut=(0.45, 0.9), reso=(0.0, 0.25), envamt=(0.0, 0.5), drive=(0.0, 0.45),
+                  noise=(0.0, 0.08), o2int=[(1, 0), (2, 0), (0, 0), (1, 7)],
+                  o2w=[W_SIN, W_TRI, W_SQR, W_DIG], fx=0.6, dly=0.4, lfo=0.55,
+                  ftypes=[F_LP24, F_LP12]),
+    "Bell":  dict(cut=(0.55, 0.95), reso=(0.0, 0.3), envamt=(0.1, 0.65), drive=(0.0, 0.3),
+                  noise=(0.0, 0.08), o2int=[(1, 0), (2, 0), (-1, 0), (1, 7), (0, 7)],
+                  o2w=[W_SIN, W_TRI, W_DIG, W_SQR], fx=0.45, dly=0.85, lfo=0.45,
+                  ftypes=[F_LP24, F_LP12, F_BP12]),
+    "Brass": dict(cut=(0.4, 0.8), reso=(0.0, 0.3), envamt=(0.25, 0.7), drive=(0.0, 0.4),
+                  noise=(0.0, 0.1), o2int=[(0, 0), (-1, 0), (1, 0), (0, 7)],
+                  o2w=[W_SAW, W_SQR, W_DIG], fx=0.55, dly=0.4, lfo=0.5,
+                  ftypes=[F_LP24, F_LP12]),
+    "Choir": dict(cut=(0.45, 0.85), reso=(0.0, 0.3), envamt=(0.0, 0.35), drive=(0.0, 0.2),
+                  noise=(0.0, 0.2), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7)],
+                  o2w=[W_SIN, W_TRI, W_SAW, W_DIG], fx=0.8, dly=0.75, lfo=0.5,
+                  ftypes=[F_LP24, F_LP12, F_BP12]),
+    "Hit":   dict(cut=(0.4, 0.85), reso=(0.05, 0.5), envamt=(0.3, 0.8), drive=(0.15, 0.7),
+                  noise=(0.05, 0.4), o2int=[(0, 0), (0, 7), (1, 0), (0, 5), (-1, 0)],
+                  o2w=[W_SAW, W_SQR, W_DIG], fx=0.4, dly=0.5, lfo=0.3,
+                  ftypes=[F_LP24, F_LP12, F_BP12]),
+    "SFX":   dict(cut=(0.2, 0.95), reso=(0.1, 0.8), envamt=(-0.6, 0.8), drive=(0.0, 0.8),
+                  noise=(0.0, 0.9), o2int=[(0, 0), (1, 0), (0, 7), (2, 0), (-1, 0), (0, 5)],
+                  o2w=[W_SAW, W_SQR, W_DIG, W_NOI, W_SIN], fx=0.6, dly=0.6, lfo=0.8,
+                  ftypes=[F_LP24, F_LP12, F_BP12, F_HP12]),
+}
+CAT["Sequence"] = CAT["Arp"]
+CAT["Init"] = CAT["Lead"]
+
+
+def _protected(recipe_name):
+    return PROTECT.get(recipe_name, [])
+
+
+def _free_mod_slot(full):
+    for m in (4, 3):  # recipes use mod1/mod2
+        if full.get(f"mod{m}_amt", 0.0) == 0.0:
+            return m
+    return None
+
+
+def _set(full, key, val, prot, cat_bass=False):
+    if prot == "*" or key in prot:
+        return False
+    full[key] = val
+    return True
+
+
+def _clamp01(x):
+    return max(0.0, min(1.0, x))
+
+
+def m_osc2(full, rng, c, prot, cat):
+    o1o = full.get("osc1_octave", 0)
+    octv, pitch = rng.choice(c["o2int"])
+    if cat == "Bass":
+        octv = min(0, o1o + octv) - o1o  # bass layers never climb above the 8' octave
+    w = rng.choice(c["o2w"])
+    ok = _set(full, "osc2_wave", w, prot)
+    if ok:
+        _set(full, "osc2_octave", max(-2, min(2, o1o + octv)), prot)
+        _set(full, "osc2_pitch", pitch, prot)
+        _set(full, "osc2_fine", rng.uniform(-9, 9), prot)
+        lv = rng.uniform(0.3, 0.85)
+        _set(full, "osc2_level", lv, prot); _set(full, "mix_o2", lv, prot)
+        if w == W_DIG:
+            _set(full, "osc2_digital", rng.choice(DIG[rng.randrange(8)]), prot)
+        _set(full, "osc2_shape", rng.uniform(0.0, 0.5), prot)
+        _set(full, "osc2_pwm", rng.uniform(0.2, 0.6), prot)
+
+
+def m_osc1_timbre(full, rng, c, prot, cat):
+    _set(full, "osc1_shape", rng.uniform(0.0, 0.6 if cat == "Bass" else 0.8), prot)
+    _set(full, "osc1_pwm", rng.uniform(0.15, 0.6), prot)
+    _set(full, "osc1_xmod", rng.uniform(0.0, 0.6), prot)
+    if full.get("osc1_wave") == W_DIG:
+        fam = full.get("osc1_digital", 0) % 8
+        if cat in ("SFX", "Arp", "Sequence", "Hit") and rng.random() < 0.5:
+            fam = rng.randrange(8)
+        _set(full, "osc1_digital", rng.choice(DIG[fam]), prot)
+
+
+def m_osc1_wave(full, rng, c, prot, cat):
+    # whole-character swap among the category's oscillator palette
+    if cat == "Keys":  # keyboards stay mellow: sine/tri tines, wood/reed/analog ROM
+        w = rng.choice([W_SIN, W_TRI, W_DIG, W_DIG])
+        fams = [6, 1, 0, 6]
+    else:
+        w = rng.choice(c["o2w"])
+        fams = list(range(8))
+    if w == W_NOI and cat != "SFX":
+        return
+    if _set(full, "osc1_wave", w, prot) and w == W_DIG:
+        _set(full, "osc1_digital", rng.choice(DIG[rng.choice(fams)]), prot)
+
+
+def m_filter(full, rng, c, prot, cat):
+    _set(full, "filter_type", rng.choice(c["ftypes"]), prot)
+    _set(full, "filter_cutoff", rng.uniform(*c["cut"]), prot)
+    _set(full, "filter_reso", rng.uniform(*c["reso"]), prot)
+    _set(full, "filter_keytrack", rng.choice([0.0, 0.25, 0.5, 0.75]), prot)
+    _set(full, "filter_envamt", rng.uniform(*c["envamt"]), prot)
+    if full.get("filter_type") == F_HP12:  # keep highpasses speaking
+        full["filter_cutoff"] = min(full["filter_cutoff"], 0.45)
+    if full.get("filter_type") == F_BP12:
+        # bandpass must sit in a mid band (~300 Hz-1.5 kHz) INCLUDING the
+        # envelope push: a band at 8+ kHz is thin and near-silent
+        full["filter_cutoff"] = min(max(full["filter_cutoff"], 0.35), 0.58)
+        full["filter_envamt"] = max(-0.25, min(full["filter_envamt"],
+                                               0.62 - full["filter_cutoff"]))
+
+
+def m_env(full, rng, c, prot, cat):
+    if cat in ("Bass", "Hit", "Arp", "Sequence"):
+        a = (0.0, 0.03); d = (0.06, 0.45); sus = (0.0, 0.8); r = (0.04, 0.3)
+    elif cat in ("Keys", "Bell"):
+        a = (0.0, 0.03); d = (0.25, 0.7); sus = (0.0, 0.5); r = (0.15, 0.55)
+    elif cat in ("Pad", "Choir"):
+        a = (0.1, 0.5); d = (0.2, 0.6); sus = (0.6, 1.0); r = (0.3, 0.7)
+    elif cat == "Brass":
+        a = (0.02, 0.15); d = (0.1, 0.4); sus = (0.6, 0.95); r = (0.08, 0.3)
+    elif cat == "SFX":
+        a = (0.0, 0.6); d = (0.1, 0.7); sus = (0.0, 1.0); r = (0.1, 0.7)
+    else:  # Lead
+        a = (0.0, 0.08); d = (0.1, 0.5); sus = (0.5, 1.0); r = (0.06, 0.4)
+    for e in ("env1", "env2"):
+        if e == "env2" and rng.random() < 0.35:
+            continue  # sometimes only the filter contour changes
+        _set(full, f"{e}_a", rng.uniform(*a), prot)
+        _set(full, f"{e}_d", rng.uniform(*d), prot)
+        _set(full, f"{e}_s", rng.uniform(*sus), prot)
+        _set(full, f"{e}_r", rng.uniform(*r), prot)
+
+
+def m_motion(full, rng, c, prot, cat):
+    """LFO2 or velocity onto a non-pitch destination via a free mod slot."""
+    m = _free_mod_slot(full)
+    if m is None:
+        return
+    if rng.random() < 0.3:  # expression instead of an LFO
+        src, dst = 4, rng.choice([4, 4, 6, 2])
+        amt = rng.uniform(0.15, 0.4)
+    else:
+        if not (_set(full, "lfo2_depth", rng.uniform(0.25, 0.8), prot)):
+            return
+        _set(full, "lfo2_wave", rng.choice([L_SIN, L_TRI, L_SQR, L_SAW, L_RND]), prot)
+        if cat in ("Bass", "Arp", "Sequence") or rng.random() < 0.35:
+            _set(full, "lfo2_sync", rng.choice([SYNC_DIV["1/4"], SYNC_DIV["1/8"],
+                                                SYNC_DIV["1/16"], SYNC_DIV["1/2"]]), prot)
+        else:
+            _set(full, "lfo2_sync", 0, prot)
+            _set(full, "lfo2_rate", rng.uniform(0.15, 0.65), prot)
+        src = 3
+        dst = rng.choice([4, 4, 2, 7, 6, 5] if cat != "Bass" else [4, 4, 2, 6])
+        amt = rng.uniform(0.15, 0.5) * rng.choice([1, -1])
+    if _set(full, f"mod{m}_amt", amt, prot):
+        full[f"mod{m}_src"] = src
+        full[f"mod{m}_dst"] = dst  # never 0/1 (pitch): invariant holds
+
+
+def m_drive(full, rng, c, prot, cat):
+    lo, hi = c["drive"]
+    d = rng.uniform(lo, hi)
+    if _set(full, "amp_drive", d, prot):
+        _set(full, "amp_dist", 1 if d > 0.2 else 0, prot)
+
+
+def m_noise(full, rng, c, prot, cat):
+    _set(full, "mix_noise", rng.uniform(*c["noise"]), prot)
+
+
+def m_fm_ring(full, rng, c, prot, cat):
+    r = rng.random()
+    if cat in ("Keys", "Bell", "SFX", "Bass", "Arp", "Sequence", "Hit") and r < 0.6:
+        _set(full, "fm_amt", rng.uniform(0.05, 0.45 if cat != "Bass" else 0.25), prot)
+    elif cat in ("Bell", "SFX", "Lead", "Arp", "Hit") and r < 0.8:
+        _set(full, "osc_mod", rng.choice([1, 2] if cat != "Bell" else [1]), prot)
+    else:
+        _set(full, "fm_amt", 0.0, prot)
+
+
+def m_expr(full, rng, c, prot, cat):
+    _set(full, "amp_velocity", rng.uniform(0.0, 0.7), prot)
+
+
+def m_space(sh, rng, c, cat):
+    """shared FX: may add, change or remove modulation FX / delay"""
+    if rng.random() < c["fx"]:
+        sh["modfx_type"] = rng.randint(1, 3)
+        sh["modfx_rate"] = rng.uniform(0.08, 0.45)
+        sh["modfx_depth"] = rng.uniform(0.15, 0.6)
+        sh["modfx_mix"] = rng.uniform(0.12, 0.45)
+    else:
+        sh["modfx_type"], sh["modfx_mix"] = 0, 0.0
+    if rng.random() < c["dly"]:
+        sh["delay_type"] = rng.randint(0, 2)
+        sh["delay_time"] = rng.uniform(0.2, 0.6)
+        sh["delay_feedback"] = rng.uniform(0.15, 0.55)
+        sh["delay_mix"] = rng.uniform(0.08, 0.35)
+    else:
+        sh["delay_mix"] = 0.0
+    sh["eq_low"] = round(rng.uniform(-4, 4) * 2) / 2
+    sh["eq_high"] = round(rng.uniform(-4, 4) * 2) / 2
+
+
+def m_arp(sh, rng, cat):
+    if not sh.get("arp_on"):
+        return
+    sh["arp_mode"] = rng.randint(0, 4)
+    sh["arp_rate"] = rng.choice([ARP_RATE["1/16"], ARP_RATE["1/8"], ARP_RATE["1/8T"],
+                                 ARP_RATE["1/16T"], ARP_RATE["1/16"]])
+    sh["arp_octaves"] = rng.choice([1, 1, 2, 2, 3])
+    sh["arp_gate"] = rng.uniform(0.25, 0.9)
+    sh["arp_swing"] = rng.choice([0.0, 0.0, 0.2, 0.35])
+
+
+TIMBRE_MOVES = [(m_osc2, 3), (m_osc1_timbre, 3), (m_filter, 3), (m_env, 3),  # weights
+                (m_motion, 2), (m_drive, 2), (m_noise, 1), (m_fm_ring, 2),
+                (m_expr, 1), (m_osc1_wave, 1)]
+
+# t2 mirrors t1 edits, except what the layer style deliberately offsets
+LAYER_OWN = {"osc1_octave", "osc2_octave", "amp_pan", "osc1_fine", "voice_detune"}
+
+
+def vary(full, rng, recipe_name, cat, n_moves):
+    prot = _protected(recipe_name)
+    if prot == "*" or cat not in CAT:
+        return
+    c = CAT[cat]
+    before = {k: full[k] for k in MOVABLE_T if k in full}
+    cut_before = full.get("filter_cutoff", 1.0)
+    moves = [m for m, w in TIMBRE_MOVES for _ in range(w)]
+    picked = set()
+    for _ in range(n_moves):
+        mv = rng.choice(moves)
+        if mv in picked:
+            continue
+        picked.add(mv)
+        mv(full, rng, c, prot, cat)
+    for k in MOVABLE_T:
+        if k in full and full[k] != before.get(k) and k not in LAYER_OWN:
+            if k == "filter_cutoff":  # layers keep their cutoff offset
+                full["t2_" + k] = _clamp01(full.get("t2_" + k, cut_before) + full[k] - cut_before)
+            else:
+                full["t2_" + k] = full[k]
+    if rng.random() < 0.75:
+        m_space(full, rng, c, cat)
+    m_arp(full, rng, cat)
+
+
+# ---- perceptual-ish distance between finished presets ----
+STRUCT_W = {"osc1_wave": 1.0, "osc2_wave": 1.0, "filter_type": 1.0, "osc_mod": 1.0,
+            "osc1_digital": 0.6, "osc2_digital": 0.4, "modfx_type": 0.6, "delay_type": 0.3,
+            "arp_mode": 0.7, "arp_rate": 0.7, "lfo1_wave": 0.5, "lfo2_wave": 0.5,
+            "lfo1_sync": 0.4, "lfo2_sync": 0.4, "amp_dist": 0.6, "arp_on": 1.0,
+            "voice_poly": 0.3, "osc1_octave": 1.0, "osc2_octave": 0.7, "osc1_pitch": 0.8,
+            "osc2_pitch": 0.7}
+for _i in (1, 2, 3, 4):
+    STRUCT_W[f"mod{_i}_src"] = 0.6
+    STRUCT_W[f"mod{_i}_dst"] = 0.6
+
+
+def effective(v):
+    eff = set()
+    pres = ["", "t2_"] if v["tmix"] > 0.0 else [""]
+    for pre in pres:
+        g_ = lambda k: v[pre + k]
+        add = lambda *ks: eff.update(pre + k for k in ks)
+        if g_("osc1_level") * g_("mix_o1") > 0:
+            add("osc1_wave", "osc1_octave", "osc1_pitch", "osc1_fine", "osc1_level",
+                "mix_o1", "osc1_shape", "osc1_pwm", "osc1_xmod")
+            if g_("osc1_wave") in (4, 6): add("osc1_digital")
+        if g_("osc2_level") * g_("mix_o2") > 0 or g_("fm_amt") > 0 or g_("osc_mod") in (1, 3):
+            add("osc2_wave", "osc2_octave", "osc2_pitch", "osc2_fine", "osc2_level",
+                "mix_o2", "osc2_shape", "osc2_pwm", "osc2_xmod", "osc_mod", "fm_amt")
+            if g_("osc2_wave") in (4, 6): add("osc2_digital")
+        if g_("mix_noise") > 0: add("mix_noise")
+        add("filter_type", "filter_cutoff", "filter_reso", "filter_keytrack", "filter_envamt",
+            "amp_level", "amp_pan", "amp_velocity", "amp_dist",
+            "env2_a", "env2_d", "env2_s", "env2_r", "voice_poly", "voice_detune")
+        if g_("amp_dist") > 0.5: add("amp_drive")
+        if g_("filter_envamt") != 0: add("env1_a", "env1_d", "env1_s", "env1_r")
+        lfo_used = {1: False, 2: False}
+        for m in (1, 2, 3, 4):
+            if g_(f"mod{m}_amt") != 0:
+                add(f"mod{m}_src", f"mod{m}_dst", f"mod{m}_amt")
+                sidx = int(g_(f"mod{m}_src"))
+                if sidx in (2, 3): lfo_used[sidx - 1] = True
+                if sidx == 0: add("env1_a", "env1_d", "env1_s", "env1_r")
+        if g_("voice_vib") > 0: lfo_used[2] = True; add("voice_vib")
+        for l in (1, 2):
+            if lfo_used[l] and g_(f"lfo{l}_depth") > 0:
+                add(f"lfo{l}_wave", f"lfo{l}_depth", f"lfo{l}_sync")
+                if g_(f"lfo{l}_sync") == 0: add(f"lfo{l}_rate")
+                else: eff.add("song_tempo")
+    if v["modfx_type"] != 0 and v["modfx_mix"] > 0:
+        eff.update(["modfx_type", "modfx_rate", "modfx_depth", "modfx_mix"])
+    if v["delay_mix"] > 0:
+        eff.update(["delay_type", "delay_time", "delay_feedback", "delay_mix"])
+    if v["arp_on"] > 0.5:
+        eff.update(["arp_on", "arp_mode", "arp_rate", "arp_gate", "arp_octaves",
+                    "arp_swing", "song_tempo"])
+    eff.update(["eq_low", "eq_high", "tmix"])
+    return eff
+
+
+def _base(k):
+    return k[3:] if k.startswith("t2_") else k
+
+
+def _is_struct(k):
+    b = _base(k)
+    return k in NCHOICE or b in STRUCT_W or b in ("amp_dist", "arp_on", "limiter", "voice_poly")
+
+
+def _n(k, x):
+    if k in NCHOICE:
+        return x
+    lo, hi, _d = RANGE[k]
+    return (x - lo) / (hi - lo) if hi > lo else 0.0
+
+
+def signature(v, eff):
+    return (frozenset(eff), tuple(sorted((k, v[k]) for k in eff if _is_struct(k))))
+
+
+def distance(a, b):
+    """(D, same_skeleton, max_knob): D = weighted structural mismatches
+    + summed normalised knob differences over the params either one uses."""
+    va, ea, sa = a
+    vb, eb, sb = b
+    d, mx = 0.0, 0.0
+    for k in ea ^ eb:  # module on in one, off in the other
+        d += 0.5
+    for k in ea & eb:
+        if _is_struct(k):
+            if va[k] != vb[k]:
+                d += STRUCT_W.get(_base(k), 0.5)
+        else:
+            diff = abs(_n(k, va[k]) - _n(k, vb[k]))
+            d += diff
+            mx = max(mx, diff)
+    return d, sa == sb, mx
+
+
+MIN_D = 2.0      # total perceptual distance to every earlier preset
+MIN_KNOB = 0.35  # same skeleton? then at least one knob must move this far
+
+
+def build_candidate(idx, rng, n_moves):
     name, recipe, layer, fixed = PATCHES[idx]
+    cat = RECIPE_TAGS[recipe.__name__][0]
     t1, t2ov, sh = recipe(rng, idx)
     full = {}
     apply("", full, t1)
@@ -1186,11 +1596,69 @@ def build_one(idx, rng):
         full["t2_" + k] = v
     shared = base_shared(rng)
     shared.update(sh)
-    shared.update(fixed)
     full.update(shared)
+    for k, val in base_timbre().items():  # complete both timbres for the moves
+        full.setdefault(k, val)
+        full.setdefault("t2_" + k, val)
+    if n_moves > 0:
+        vary(full, rng, recipe.__name__, cat, n_moves)
+    full.update(fixed)  # per-patch fixes (tempo, tmix) always win
+    # measured loudness trim (Tools/level_bank.py): even, slightly lower levels
+    full["output_level"] = LEVELS.get(idx, 1.0)
+    return finalize(name, recipe, full)
+
+
+# ---- IN-KEY GUARANTEE: every oscillator stays within CENT_LIMIT of the
+# played key (or a fourth/fifth/octave of it). Sources of detune in the
+# engine: osc fine, the Detune knob (osc1 -15c*d, osc2 +15c*d), mono unison
+# taps (+-25c*d), triangle Shape (retunes up to +19 st, and LFO1 reaches it
+# through PWM), vibrato, FM/ring sidebands of non-octave osc2 ratios.
+CENT_LIMIT = 24.0
+
+_LEVELS_FILE = ROOT / "Tools" / "bank_levels.json"
+LEVELS = {int(k): float(v) for k, v in __import__("json").loads(_LEVELS_FILE.read_text()).items()} \
+    if _LEVELS_FILE.exists() else {}
+KEY_INTERVALS = (0, 5, 7, 12, -5, -7, -12)
+
+
+def pitch_safe(full):
+    full["master_tune"] = 0.0
+    for pre in ("", "t2_"):
+        g = lambda k: full[pre + k]
+        full[pre + "osc1_pitch"] = 0  # osc1 defines the key
+        if g("osc2_pitch") not in KEY_INTERVALS:
+            full[pre + "osc2_pitch"] = 7 if g("osc2_pitch") > 0 else -5
+        if g("osc_mod") in (1, 3) or g("fm_amt") > 0:
+            # ring/FM sidebands are only in key for octave ratios
+            if g("osc2_pitch") not in (0, 12, -12):
+                full[pre + "osc2_pitch"] = 0
+        for o in ("osc1", "osc2"):
+            if g(o + "_wave") == W_TRI:
+                full[pre + o + "_shape"] = 0.0  # tri Shape = +19 st retune
+                full[pre + o + "_pwm"] = 0.0    # ...and LFO1 reaches it via PWM
+        if g("osc1_wave") == W_TRI:
+            for m in (1, 2, 3, 4):
+                if g(f"mod{m}_dst") == 2 and g(f"mod{m}_amt") != 0:
+                    full[pre + f"mod{m}_dst"] = 4  # shape mod -> cutoff instead
+        # detune budget per oscillator: |fine -/+ 15d| + unison 25d <= limit
+        d = full[pre + "voice_detune"]
+        unison = int(round(full[pre + "voice_poly"])) == 1 and d > 0.01
+        if unison:
+            d = min(d, 0.55)
+            full[pre + "voice_detune"] = d
+        room = CENT_LIMIT - (25.0 * d if unison else 0.0)
+        full[pre + "osc1_fine"] = max(15 * d - room, min(15 * d + room, g("osc1_fine")))
+        full[pre + "osc2_fine"] = max(-15 * d - room, min(-15 * d + room, g("osc2_fine")))
+        # vibrato (mod wheel) peak = 2% * vib * LFO2 depth: keep under ~24c
+        lim = 0.0139 / 0.02
+        if g("voice_vib") * max(g("lfo2_depth"), 1e-6) > lim:
+            full[pre + "voice_vib"] = lim / max(g("lfo2_depth"), 1e-6)
+
+
+def finalize(name, recipe, full):
+    pitch_safe(full)
     # ---- NO-DRIFT INVARIANTS (bank-wide, machine-checked) ----
-    # 1. No modulation source may touch pitch with nonzero amount
-    #    (t2 matrix is a copy of t1's: check both).
+    # 1. No modulation source may touch pitch with nonzero amount.
     for i in (1, 2, 3, 4):
         for pre in ("", "t2_"):
             if full.get(f"{pre}mod{i}_dst") in (0, 1):
@@ -1199,15 +1667,13 @@ def build_one(idx, rng):
     # 2. No portamento anywhere: glides are pitch drift by definition.
     assert full.get("voice_portamento", 0.0) == 0.0, f"{name}: portamento"
     assert full.get("t2_voice_portamento", 0.0) == 0.0, f"{name}: t2 portamento"
-    # 3. Chorus/flanger are delay-modulation: keep bank values in the
-    #    musical zone (rewritten DSP: shallow sweeps, dry-anchored pitch).
-    #    Phaser needs no caps (allpass: zero pitch shift).
+    # 3. Chorus/flanger are delay-modulation: keep depth/rate in the musical zone.
     if full.get("modfx_type") in (1, 2):
         full["modfx_depth"] = min(full.get("modfx_depth", 0.0), 0.35)
         full["modfx_rate"] = min(full.get("modfx_rate", 0.0), 0.35)
-    tags = tags_for(recipe, full_t1_probe(t1), shared)
-    # validate + order
-    vals = []
+    probe = {k: full[k] for k in base_timbre()}
+    tags = tags_for(recipe, probe, full)
+    vals, vmap = [], {}
     for pid in KIDS:
         assert pid in full, f"{name}: missing {pid}"
         v = full[pid]
@@ -1218,7 +1684,40 @@ def build_one(idx, rng):
             lo, hi, _d = RANGE[pid]
             v = float(min(hi, max(lo, v)))
         vals.append(v)
-    return name, vals, tags
+        vmap[pid] = v
+    eff = effective(vmap)
+    return name, vals, tags, (vmap, eff, signature(vmap, eff))
+
+
+def build_one(idx, rng, accepted, salt=0):
+    """Re-roll until the preset is distinct from everything accepted so far.
+    salt > 0 (from Tools/bank_salts.json) = the audio check flagged this slot
+    as sounding like an earlier preset: vary harder."""
+    recipe_name = PATCHES[idx][1].__name__
+    if _protected(recipe_name) == "*" or PATCHES[idx][0].startswith("Init"):
+        # Init voices stay vanilla starting points
+        return build_candidate(idx, rng, 0)
+    best, best_score = None, -1.0
+    for attempt in range(80):
+        n_moves = 2 + attempt // 8 + 2 * salt  # escalate variation when stuck
+        cand = build_candidate(idx, rng, n_moves)
+        worst = 1e9
+        ok = True
+        for other in accepted:
+            d, same, mx = distance(cand[3], other)
+            score = d if not same else min(d, MIN_D * mx / MIN_KNOB)
+            worst = min(worst, score)
+            if d < MIN_D or (same and mx < MIN_KNOB):
+                ok = False
+                if worst < best_score:
+                    break
+        if ok:
+            return cand
+        if worst > best_score:
+            best, best_score = cand, worst
+    print(f"  note: {PATCHES[idx][0]!r} kept best of 80 (min distance {best_score:.2f})",
+          file=sys.stderr)
+    return best
 
 
 def full_t1_probe(t1partial):
@@ -1229,11 +1728,19 @@ def full_t1_probe(t1partial):
 
 def main():
     import json as _json
-    rng = random.Random(20261007)
+    import json as _json2
+    salts_file = ROOT / "Tools" / "bank_salts.json"
+    salts = {int(k): v for k, v in _json2.loads(salts_file.read_text()).items()} \
+        if salts_file.exists() else {}
     bank = {"type": "NanoFrogBank", "version": 1, "param_count": len(KIDS),
             "param_ids": KIDS, "presets": []}
+    accepted = []
     for i in range(len(PATCHES)):
-        name, vals, tags = build_one(i, rng)
+        # Per-slot RNG: re-rolling one slot (salt) never reshuffles the others.
+        salt = salts.get(i, 0)
+        rng = random.Random(f"20261007-{i}-{salt}")
+        name, vals, tags, key = build_one(i, rng, accepted, salt)
+        accepted.append(key)
         bank["presets"].append({"name": name, "tags": tags, "values": vals})
     outdir = ROOT / "FactoryBank"
     outdir.mkdir(exist_ok=True)
@@ -1241,4 +1748,5 @@ def main():
     print(f"wrote {len(PATCHES)} presets", file=sys.stderr)
 
 
-main()
+if __name__ == "__main__":
+    main()

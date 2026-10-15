@@ -32,6 +32,10 @@ public:
     // (no message-queue timing involved).
     bool testOverwriteSelected() { return overwriteSelectedRow(); }
     bool testDeleteSelected() { return deleteSelectedRow(); }
+    void testSetName (const juce::String& n) { nameBox.setText (n, true); }
+    void testClickSave() { clickSave(); }
+    bool testOverwriteArmed() const { return overwriteArmed; }
+    void testShowCategory (const juce::String& c) { activeCat = c; refreshCatButtons(); rebuildRows(); }
 
 private:
     int getNumRows() override;
@@ -61,8 +65,11 @@ private:
     juce::TextButton delBtn { "DEL" };
     juce::ComboBox saveCat;
     juce::Label nameCap;
-    juce::TextEditor nameBox;
-    juce::String nextDefaultName();
+    juce::TextEditor nameBox; // inline save name (prefilled with the current preset)
+    bool overwriteArmed = false;
+    void clickSave();          // SAVE / Enter: second click needed to replace a file
+    void setOverwriteArmed (bool on);
+    juce::String currentPresetName() const;
     juce::Label status;
     std::vector<std::unique_ptr<juce::TextButton>> catBtns;
     std::vector<int> rows; // factory index, or PresetBank::userRow(u)
