@@ -34,7 +34,8 @@ struct VoiceParams
     const float* userTable2 = nullptr; // osc2 bank entry (null = none)
     double songTempo = 120.0; // beats for tempo-synced LFOs / arpeggiator
     int lfo1Note = -1, lfo2Note = -1; // T-5 sync division, -1 = free rate
-    bool unison = false; // 2-tap detuned stack (mono unison mode)
+    bool unison = false; // 2-tap detuned stack (mono voice with DETUNE up)
+    int lfo1KeySync = 2, lfo2KeySync = 2; // 0 off (free-running), 1 timbre, 2 voice
 };
 
 // Tempo-sync divisions (MIDI table T-5), in beats. Index = sync-note value.
@@ -67,7 +68,7 @@ public:
         active = false; note = -1; velocity = 0; fade = 1.0f;
         stealing = false; pendingNote = -1; stealGain = 0.0f;
         lfo1MulSm = lfo2MulSm = 0.0f; fmPhase = 0.0f;
-        curFreq1 = curFreq2 = 440.0; cutSm = 8000; ampSm = 0.0; panSmL = panSmR = 0.7f;
+        curFreq1 = curFreq2 = 440.0; cutSm = -1.0; ampSm = 0.0; panSmL = panSmR = 0.7f;
         age = 0; randConst = (float) rand() / RAND_MAX * 2.0f - 1.0f;
     }
 
@@ -91,7 +92,10 @@ public:
         eg1.setParams (p.e1a, p.e1d, p.e1s, p.e1r);
         eg2.setParams (p.e2a, p.e2d, p.e2s, p.e2r);
         eg1.noteOn(); eg2.noteOn();
-        lfo1.keySync (true); lfo2.keySync (true);
+        // LFO KEY SYNC: VOICE restarts per note, TIMBRE is set by the
+        // processor (phrase start / follow), OFF free-runs
+        if (p.lfo1KeySync == 2) lfo1.keySync (true);
+        if (p.lfo2KeySync == 2) lfo2.keySync (true);
         // freq targets set lazily per-sample; init glide start at current or target
         double t = baseFreq (midiNote, p, true);
         if (p.portamento <= 0.001f) { curFreq1 = t; curFreq2 = baseFreq (midiNote, p, false); }
@@ -101,9 +105,41 @@ public:
             osc2.setPhase (osc1.getPhase());
             osc2b.setPhase (osc1.getPhase());
         }
+        syncPendingD = -1.0; s2Prev = s2h1 = s2h2 = 0.0f;
     }
 
     void noteOff() { eg1.noteOff(); eg2.noteOff(); pendingNote = -1; }
+    // once per block: envelope knob moves reach notes that are already sounding
+    void updateEnvelopes (const VoiceParams& p)
+    {
+        eg1.setParams (p.e1a, p.e1d, p.e1s, p.e1r);
+        eg2.setParams (p.e2a, p.e2d, p.e2s, p.e2r);
+    }
+    // Mono / Unison: move the sounding voice to a new key without restarting
+    // it. Pitch glides with PORTAMENTO (or snaps); retrigger restarts both
+    // envelopes from where they are (Multi trigger), otherwise they keep going
+    // (Single trigger = legato).
+    void legato (int midiNote, float vel, const VoiceParams& p, bool retrigger)
+    {
+        if (! active || stealing) { noteOn (midiNote, vel, p, false); return; }
+        note = midiNote;
+        if (p.portamento <= 0.001f) { curFreq1 = baseFreq (midiNote, p, true); curFreq2 = baseFreq (midiNote, p, false); }
+        if (retrigger)
+        {
+            velocity = vel;
+            eg1.setParams (p.e1a, p.e1d, p.e1s, p.e1r);
+            eg2.setParams (p.e2a, p.e2d, p.e2s, p.e2r);
+            eg1.noteOn(); eg2.noteOn();
+            if (p.lfo1KeySync == 2) lfo1.keySync (true);
+            if (p.lfo2KeySync == 2) lfo2.keySync (true);
+        }
+        else if (eg2.getStage() == Adsr::Release) { eg1.noteOn(); eg2.noteOn(); } // released voice: start again
+    }
+    // Unison stack: this voice's offset (cents) and its share of the level
+    void setUnison (float cents, float gain) { unisonCents = cents; unisonGain = gain; }
+    // LFO key sync TIMBRE: new voices follow the phase of a sounding one
+    void getLfoPhases (double& a, double& b) const { a = lfo1.getPhase(); b = lfo2.getPhase(); }
+    void setLfoPhases (double a, double b) { lfo1.setPhase (a); lfo2.setPhase (b); }
     void fastKill()
     {
         eg1.reset(); eg2.reset(); active = false;
@@ -170,13 +206,15 @@ public:
         {
             switch (s)
             {
-                case 0: return e1 * 2.0f - 1.0f;      // ENV1 bipolar-ish
-                case 1: return e2 * 2.0f - 1.0f;      // ENV2
+                // EGs, velocity and the mod wheel are unipolar (0..1) like the
+                // hardware's virtual patch: at rest they add nothing
+                case 0: return e1;
+                case 1: return e2;
                 case 2: return l1; case 3: return l2;
-                case 4: return velocity * 2.0f - 1.0f;
+                case 4: return velocity;
                 case 5: return keyTrack;
                 case 6: return bendSemi / 12.0f * 2.0f;
-                case 7: return modWheel * 2.0f - 1.0f;
+                case 7: return modWheel;
                 case 8: return randConst;
                 default: return 0.0f;
             }
@@ -194,7 +232,7 @@ public:
             float v = srcVal (p.mSrc[i]) * amt;
             switch (p.mDst[i])
             {
-                case 0: o1pitch += v * 12.0f; break;   // semitones
+                case 0: o1pitch += v * 12.0f; o2pitch += v * 12.0f; break; // PITCH: both oscillators (semitones)
                 case 1: o2pitch += v * 12.0f; break;
                 case 2: o1shape += v * 0.5f; break;
                 case 3: noiseAdd += v * 0.5f; break;
@@ -235,9 +273,8 @@ public:
         {
             if (w1 == 0) return o.sawMorph (f, c1e);
             if (w1 == 1) return o.squarePw (f, 0.5 * (1.0 - c1e));
-            if (w1 == 2) return o.render (2, f * std::pow (2.0, c1e * 19.0 / 12.0),
-                                          0.0f, 0.5f, 0.0f, 0);
-            if (w1 == 3) return o.render (3, f, c1e, 0.0f, p.osc1Xmod, 0);
+            if (w1 == 2) return o.triFold (f, c1e);              // TRIANGLE: C1 folds the wave
+            if (w1 == 3) return o.sineXmod (f, c1e, lastS2);     // SINE: C1 = cross mod from OSC2
             // Digital/User share one selector: factory wave (<128) or bank
             // entry (>=128). The Digital combo always sounds, whichever of
             // the two wave modes is active (userTable preset by the host).
@@ -303,15 +340,16 @@ public:
             float a2 = renderO2 (osc2, curFreq2 * uA);
             float b2 = renderO2 (osc2b, curFreq2 * uB);
             s2 = 0.5f * (a2 + b2);
-            if (syncOn && osc1.getPhase() < prevPh) { osc2.setPhase (0.0); osc2b.setPhase (0.0); }
+            if (syncOn) s2 = syncBlep (s2, osc1.getPhase() < prevPh, curFreq1 * uA * fmMul, curFreq2 * uA, true);
         }
         else
         {
             double prevPh = osc1.getPhase();
             s1 = renderO1 (osc1, curFreq1 * fmMul);
             s2 = renderO2 (osc2, curFreq2);
-            if (syncOn && osc1.getPhase() < prevPh) osc2.setPhase (0.0); // hard sync
+            if (syncOn) s2 = syncBlep (s2, osc1.getPhase() < prevPh, curFreq1 * fmMul, curFreq2, false);
         }
+        lastS2 = s2;
         if (ringOn) s2 = s1 * s2 * 1.5f; // ring
         float nz = noiseOsc.render (5, 440.0, 0, 0, 0, 0);
 
@@ -321,14 +359,15 @@ public:
         float mixed = s1 * gO1 + s2 * gO2 + nz * gN * 0.7f;
         mixed = std::tanh (mixed * 1.3f); // mixer warmth: gentle glue, tames harsh peaks
 
-        // filter
-        float cutNorm = clamp01 (p.filtCut + e1 * p.filtEnv + cutAdd + keyTrack * p.filtKey * 0.5f);
+        // filter: only the CUTOFF knob is smoothed (8 ms, no zipper); EG1, the
+        // patch modulation and key track act at once, so envelope snaps stay snappy
+        double c2 = std::exp (-1.0 / (0.008 * fs));
+        if (cutSm < 0.0) cutSm = p.filtCut;
+        cutSm = cutSm * c2 + (double) p.filtCut * (1.0 - c2);
+        float cutNorm = clamp01 (float (cutSm) + e1 * p.filtEnv + cutAdd + keyTrack * p.filtKey * 0.5f);
         float reso = clamp01 (p.filtRes + resAdd);
         float cutHz = 40.0f * std::pow (450.0f, cutNorm); // 40..18000
-        // smooth cutoff to avoid zipper
-        double c2 = std::exp (-1.0 / (0.008 * fs));
-        cutSm = cutSm * c2 + cutHz * (1.0 - c2);
-        float f = filt.process (p.filtType, float (cutSm), reso, mixed);
+        float f = filt.process (p.filtType, cutHz, reso, mixed);
 
         // amp: env2 * level * velocity * mod
         float velGain = 1.0f - p.ampVel * (1.0f - velocity);
@@ -345,13 +384,42 @@ public:
         // smooth pan gains
         panSmL = panSmL * 0.999f + l * 0.001f;
         panSmR = panSmR * 0.999f + r * 0.001f;
-        outL = a * panSmL * 1.4f * fade;
-        outR = a * panSmR * 1.4f * fade;
+        outL = a * panSmL * 1.4f * fade * unisonGain;
+        outR = a * panSmR * 1.4f * fade * unisonGain;
         // LESSONS.md #11: short attack fade-in suppresses attack/steal clicks.
         if (fade < 1.0f) fade = std::min (1.0f, fade + 1.0f / (0.003f * (float) fs));
     }
 
 private:
+    // Hard sync, band-limited: OSC2 restarts at the fractional moment OSC1
+    // wrapped, and the jump (measured against OSC2's own extrapolated path)
+    // is smoothed with a two-sample polyBLEP split over this sample and the
+    // previous one; OSC2 runs one sample late while sync is on for that.
+    float syncBlep (float s2, bool wrapped, double f1, double f2, bool both)
+    {
+        if (syncPendingD >= 0.0)
+        {
+            const float d = (float) syncPendingD;
+            const float jump = s2 - (2.0f * s2h1 - s2h2);
+            s2h2 = s2h1; s2h1 = s2;
+            s2 += -jump * 0.5f * (1.0f - d) * (1.0f - d);
+            s2Prev += jump * 0.5f * d * d;
+            syncPendingD = -1.0;
+        }
+        else { s2h2 = s2h1; s2h1 = s2; }
+        const float out = s2Prev;
+        s2Prev = s2;
+        if (wrapped)
+        {
+            const double inc1 = f1 / fs, inc2 = f2 / fs;
+            const double d = inc1 > 1.0e-9 ? juce_clamp01 (osc1.getPhase() / inc1) : 0.0; // time since the wrap
+            osc2.setPhase (d * inc2);
+            if (both) osc2b.setPhase (d * inc2);
+            syncPendingD = d;
+        }
+        return out;
+    }
+    static double juce_clamp01 (double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); }
     static float clamp01 (float x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
     static float clamp11 (float x) { return x < -1 ? -1 : (x > 1 ? 1 : x); }
 
@@ -362,7 +430,7 @@ private:
         float fin = first ? p.osc1Fine : p.osc2Fine;
         // Detune knob: opposing spread, osc1 down / osc2 up, max +/-15 cents.
         double spread = p.detune * 15.0 * (first ? -1.0 : 1.0);
-        double f = noteToFreq (midiNote) * std::pow (2.0, oct + pit / 12.0 + (fin + spread) / 1200.0);
+        double f = noteToFreq (midiNote) * std::pow (2.0, oct + pit / 12.0 + (fin + spread + unisonCents) / 1200.0);
         return f;
     }
 
@@ -380,7 +448,12 @@ private:
     bool stealing = false;
     int pendingNote = -1;
     float pendingVel = 0.0f, stealGain = 0.0f;
-    double curFreq1 = 440, curFreq2 = 440, cutSm = 8000, ampSm = 0;
+    double curFreq1 = 440, curFreq2 = 440, cutSm = -1.0, ampSm = 0; // cutSm: smoothed CUTOFF knob (0..1, -1 = snap)
     float panSmL = 0.7f, panSmR = 0.7f;
     long age = 0;
+    float unisonCents = 0.0f, unisonGain = 1.0f; // Unison stack offset / level share
+    float lastS2 = 0.0f;                          // OSC2's last output (SINE cross mod)
+    // sync BLEP state: OSC2 history (extrapolates the no-reset path) + delay
+    double syncPendingD = -1.0;
+    float s2Prev = 0.0f, s2h1 = 0.0f, s2h2 = 0.0f;
 };

@@ -18,6 +18,28 @@ NanoFrogProcessor::NanoFrogProcessor()
     arp.pattern.reserve (128 * 4 * 2);
     if (PresetBank::isFallback())
         PresetBank::installFallback (PresetBank::capture (apvts)); // Init from live defaults
+    undo = std::make_unique<SnapshotUndo> (*this,
+        [this]
+        {
+            juce::ValueTree t ("NF_UNDO");
+            t.setProperty ("preset", currentPreset, nullptr);
+            t.setProperty ("user", currentUser, nullptr);
+            auto v = PresetBank::capture (apvts);
+            juce::MemoryBlock mb (v.data(), v.size() * sizeof (float));
+            t.setProperty ("values", mb, nullptr);
+            return t;
+        },
+        [this] (const juce::ValueTree& t)
+        {
+            if (auto* mb = t.getProperty ("values").getBinaryData())
+            {
+                std::vector<float> v (mb->getSize() / sizeof (float));
+                std::memcpy (v.data(), mb->getData(), v.size() * sizeof (float));
+                PresetBank::apply (apvts, v);
+            }
+            currentPreset = t.getProperty ("preset", currentPreset);
+            currentUser = t.getProperty ("user", "").toString();
+        });
 }
 
 NanoFrogProcessor::~NanoFrogProcessor() {}
@@ -118,9 +140,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoFrogProcessor::createPar
             juce::ParameterID (pre + "lfo2_sync", 1),
             pre.isEmpty() ? juce::String ("LFO2 Sync") : juce::String ("LFO2 Sync T2"),
             syncNotes, 0));
+        // LFO KEY SYNC (hardware): VOICE restarts each note's LFO, TIMBRE
+        // restarts on the first key of a phrase and later notes follow it,
+        // OFF free-runs
+        for (auto k : { "lfo1_keysync", "lfo2_keysync" })
+            layout.add (std::make_unique<juce::AudioParameterChoice> (
+                juce::ParameterID (pre + k, 1),
+                juce::String (k[3] == '1' ? "LFO1 Key Sync" : "LFO2 Key Sync") + (pre.isEmpty() ? "" : " T2"),
+                juce::StringArray { "Off", "Timbre", "Voice" }, 2));
     }
     juce::StringArray srcs { "ENV1","ENV2","LFO1","LFO2","Velocity","KeyTrack","PitchBend","ModWheel","Random" };
-    juce::StringArray dsts { "OSC1 Pitch","OSC2 Pitch","OSC1 Shape","Noise Level","Filter Cutoff","Filter Reso","Amp Level","Pan","LFO1 Rate","LFO2 Rate" };
+    juce::StringArray dsts { "Pitch","OSC2 Pitch","OSC1 Shape","Noise Level","Filter Cutoff","Filter Reso","Amp Level","Pan","LFO1 Rate","LFO2 Rate" };
     juce::String sids[4] = { pre + "mod1_src", pre + "mod2_src", pre + "mod3_src", pre + "mod4_src" };
     juce::String dids[4] = { pre + "mod1_dst", pre + "mod2_dst", pre + "mod3_dst", pre + "mod4_dst" };
     juce::String aids[4] = { pre + "mod1_amt", pre + "mod2_amt", pre + "mod3_amt", pre + "mod4_amt" };
@@ -148,24 +178,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoFrogProcessor::createPar
     F ("", "eq_low","EQ Low", -12, 12, 0);
     F ("", "eq_high","EQ High", -12, 12, 0);
     B ("", "arp_on","Arp On", false);
-    C ("", "arp_mode","Arp Mode", {"Up","Down","AltUp","AltDown","Random","Trigger"}, 0);
-    C ("", "arp_rate","Arp Rate", {"1/4","1/8","1/16","1/8T","1/16T","1/32"}, 2);
+    C ("", "arp_mode","Arp Mode", {"Up","Down","Alt1","Alt2","Random","Trigger"}, 0);
+    C ("", "arp_rate","Arp Rate", {"1/4","1/8","1/16","1/8T","1/16T","1/32","1/6"}, 2);
     F ("", "arp_gate","Arp Gate", 0, 1, 0.8f);
     F ("", "arp_octaves","Arp Octaves", 1, 4, 1);
     F ("", "arp_swing","Arp Swing", -1, 1, 0);
     B ("", "arp_latch","Arp Latch", false);
+    // LAST STEP 1..8 + per-step on/off (a switched-off step is a rest)
+    F ("", "arp_last_step","Arp Last Step", 1, 8, 8);
+    for (int k = 1; k <= 8; ++k)
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID ("arp_step" + juce::String (k), 1), "Arp Step " + juce::String (k), true));
     auto addVoice = [&] (const juce::String& pre)
     {
         F (pre, "voice_poly","Polyphony", 1, 8, 1);
         F (pre, "voice_detune","Detune", 0, 1, 0.0f);
         F (pre, "voice_portamento","Portamento", 0, 1, 0);
         F (pre, "voice_vib","Vibrato", 0, 1, 0.0f);
+        // VOICE ASSIGN (hardware): Poly, Mono (one voice, note priority,
+        // Single = legato / Multi = retrigger), Unison (4 stacked voices)
+        C (pre, "voice_assign","Voice Assign", {"Poly","Mono","Unison"}, 0);
+        C (pre, "voice_trigger","Trigger Mode", {"Single","Multi"}, 0);
+        C (pre, "voice_priority","Note Priority", {"Last","Low","High"}, 0);
+        F (pre, "voice_unidet","Unison Detune", 0, 99, 15);
     };
     addVoice ("");
     addVoice ("t2_");
     F ("", "output_level","Output Level", 0, 1.25f, 1.0f);
     F ("", "master_tune","Master Tune", -50, 50, 0);
     F ("", "song_tempo","Song Tempo", 20, 300, 120);
+    F ("", "bend_range","Bend Range", 0, 12, 2);
+    // delay tempo sync: Off (TIME knob) or a note value at the song / host tempo
+    C ("", "delay_sync","Delay Sync", {"Off","1/1","3/4","2/3","1/2","3/8","1/3","1/4","3/16","1/6","1/8","3/32","1/12","1/16","1/24","1/32"}, 0);
     // ---- shared: timbre crossfade (0 = Timbre 1, 1 = Timbre 2) ----
     F ("", "tmix","Timbre Mix", 0, 1, 0.0f);
     // ---- output safety: brickwall-ish ceiling post output gain ----
@@ -253,7 +297,10 @@ VoiceParams NanoFrogProcessor::collectVoiceParams (int timbre)
     p.lfo1Note = (int) P ("lfo1_sync") - 1;
     p.lfo2Note = (int) P ("lfo2_sync") - 1;
     p.songTempo = effBpm;
-    p.unison = ((int) std::round (P ("voice_poly")) == 1 && p.detune > 0.01f);
+    // the 2-tap DETUNE stack belongs to a mono voice (Unison assign stacks 4 voices instead)
+    p.unison = ((int) P ("voice_assign") == 1 && p.detune > 0.01f);
+    p.lfo1KeySync = (int) P ("lfo1_keysync");
+    p.lfo2KeySync = (int) P ("lfo2_keysync");
     p.userTable = nullptr;
     p.userTable2 = nullptr;
     {
@@ -264,9 +311,9 @@ VoiceParams NanoFrogProcessor::collectVoiceParams (int timbre)
             int b1 = p.osc1Digital >= 128 ? p.osc1Digital - 128 : p.osc1Digital;
             int b2 = p.osc2Digital >= 128 ? p.osc2Digital - 128 : p.osc2Digital;
             if (p.osc1Wave == 6 || p.osc1Wave == 4)
-                p.userTable = bankBuf[bankActive.load()][juce::jlimit (0, bc - 1, b1)];
+                p.userTable = bankMip[bankActive.load()][juce::jlimit (0, bc - 1, b1)];
             if (p.osc2Wave == 6 || p.osc2Wave == 4)
-                p.userTable2 = bankBuf[bankActive.load()][juce::jlimit (0, bc - 1, b2)];
+                p.userTable2 = bankMip[bankActive.load()][juce::jlimit (0, bc - 1, b2)];
         }
     }
     return p;
@@ -281,6 +328,10 @@ void NanoFrogProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     delay.setSampleRate (sampleRate);
     eq.setSampleRate (sampleRate);
     monoScratch.assign ((size_t) juce::jmax (1, samplesPerBlock), 0.0f);
+    limiter.prepare (sampleRate);
+    setLatencySamples (limiter.latency()); // lookahead, held while the limiter is off
+    dcX[0] = dcX[1] = dcY[0] = dcY[1] = 0.0f;
+    gateG = 1.0f; idleSamples = 0;
 }
 
 int NanoFrogProcessor::allocateVoice (int timbre, int note, int poly)
@@ -302,6 +353,96 @@ int NanoFrogProcessor::allocateVoice (int timbre, int note, int poly)
     return idx;
 }
 
+// Poly voice start, with LFO KEY SYNC = TIMBRE: the first voice of a phrase
+// restarts the LFOs, later voices take their phase from one already sounding.
+void NanoFrogProcessor::startPolyVoice (int t, int note, float vel)
+{
+    const auto& vp = blockVp[t];
+    int vi = allocateVoice (t, note, blockPoly[t]);
+    const NanoVoice* ref = nullptr;
+    for (int k = 0; k < MaxVoices; ++k)
+        if (k != vi && voices[t][k].isActive()) { ref = &voices[t][k]; break; }
+    auto& v = voices[t][vi];
+    v.setUnison (0.0f, 1.0f);
+    v.noteOn (note, vel, vp, false);
+    if (vp.lfo1KeySync == 1 || vp.lfo2KeySync == 1)
+    {
+        double a, b, ra = 0.0, rb = 0.0;
+        v.getLfoPhases (a, b);
+        if (ref != nullptr) ref->getLfoPhases (ra, rb);
+        v.setLfoPhases (vp.lfo1KeySync == 1 ? ra : a, vp.lfo2KeySync == 1 ? rb : b);
+    }
+}
+
+// the key a Mono / Unison timbre sounds: last pressed, lowest or highest held
+int NanoFrogProcessor::monoPick (int t) const
+{
+    if (heldNotes.empty()) return -1;
+    if (blockPriority[t] == 1) return *std::min_element (heldNotes.begin(), heldNotes.end());
+    if (blockPriority[t] == 2) return *std::max_element (heldNotes.begin(), heldNotes.end());
+    return heldNotes.back();
+}
+
+// Mono (one voice) / Unison (voices 0..3, detuned): a new key, or an arp step.
+// Single trigger: overlapping keys slide (legato, envelopes keep going);
+// Multi: every key restarts the envelopes. Detached notes always restart.
+void NanoFrogProcessor::monoNoteOn (int t, int note, float vel, bool fromArp)
+{
+    const int stack = blockAssign[t] == 2 ? kUnison : 1;
+    const auto& vp = blockVp[t];
+    int target = fromArp ? note : monoPick (t);
+    if (target < 0) return;
+    bool sounding = false, gated = false;
+    for (int k = 0; k < stack; ++k)
+        if (voices[t][k].isActive()) { sounding = true; break; }
+    gated = sounding && ! fromArp && (int) heldNotes.size() > 1; // another key was already down
+    for (int k = 0; k < stack; ++k)
+    {
+        auto& v = voices[t][k];
+        // unison spread: four voices across the DETUNE width (cents), 1/2 level each
+        const float off = stack == 1 ? 0.0f : blockUniDet[t] * ((float) k / (float) (stack - 1) - 0.5f);
+        v.setUnison (off, stack == 1 ? 1.0f : 0.5f);
+        if (v.isActive() && v.getNote() == target && gated) continue; // already there (priority kept it)
+        if (sounding && v.isActive())
+            v.legato (target, vel, vp, ! gated || blockTrigger[t] == 1);
+        else
+            v.noteOn (target, vel, vp, false);
+    }
+    for (int k = stack; k < MaxVoices; ++k)
+        if (voices[t][k].isActive()) voices[t][k].noteOff(); // leftovers from a poly / unison switch
+}
+
+// a key is up (and the pedal isn't holding it): fall back to another held key
+// or release
+void NanoFrogProcessor::monoRelease (int t, int note)
+{
+    const int stack = blockAssign[t] == 2 ? kUnison : 1;
+    bool ours = false;
+    for (int k = 0; k < stack; ++k)
+        if (voices[t][k].isActive() && voices[t][k].getNote() == note) ours = true;
+    if (! ours) return;
+    int next = monoPick (t);
+    for (int k = 0; k < stack; ++k)
+    {
+        auto& v = voices[t][k];
+        if (! v.isActive()) continue;
+        if (next >= 0) v.legato (next, lastVel, blockVp[t], blockTrigger[t] == 1);
+        else v.noteOff();
+    }
+}
+
+void NanoFrogProcessor::releaseKey (int n)
+{
+    for (int t = 0; t < 2; ++t)
+    {
+        if (t == 1 && blockT2Off) continue;
+        if (blockAssign[t] != 0) monoRelease (t, n);
+        else
+            for (auto& v : voices[t])
+                if (v.isActive() && v.getNote() == n) v.noteOff();
+    }
+}
+
 void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
 {
     if (m.isNoteOn())
@@ -317,14 +458,15 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
             if (std::find (arp.held.begin(), arp.held.end(), n) == arp.held.end())
                 arp.held.push_back (n);
         }
-        if (std::find (heldNotes.begin(), heldNotes.end(), n) == heldNotes.end())
-            heldNotes.push_back (n);
+        heldNotes.erase (std::remove (heldNotes.begin(), heldNotes.end(), n), heldNotes.end());
+        heldNotes.push_back (n); // press order (Last priority)
         if (! blockArpOn)
         {
             for (int t = 0; t < 2; ++t)
             {
-                int vi = allocateVoice (t, n, blockPoly[t]);
-                voices[t][vi].noteOn (n, vel, blockVp[t], false);
+                if (t == 1 && blockT2Off) continue; // Timbre Mix at 0: T2 is silent anyway
+                if (blockAssign[t] != 0) monoNoteOn (t, n, vel, false);
+                else startPolyVoice (t, n, vel);
             }
         }
     }
@@ -339,9 +481,7 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
             else
             {
                 sustainHeld[n] = 0;
-                for (int t = 0; t < 2; ++t)
-                    for (auto& v : voices[t])
-                        if (v.isActive() && v.getNote() == n) v.noteOff();
+                releaseKey (n);
             }
         }
     }
@@ -349,7 +489,8 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
     {
         // LESSONS.md #13: center is 8192, with a deadband so worn wheels pin exact zero.
         int raw = m.getPitchWheelValue();
-        bendSemi = (std::abs (raw - 8192) <= 48) ? 0.0f : (raw - 8192) / 8192.0f * 2.0f; // +/-2 semitones
+        const float range = pv (apvts, "bend_range"); // semitones each way
+        bendSemi = (std::abs (raw - 8192) <= 48) ? 0.0f : (raw - 8192) / 8192.0f * range;
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
@@ -375,9 +516,7 @@ void NanoFrogProcessor::handleMidi (const juce::MidiMessage& m)
                     if (sustainHeld[i] != 0
                         && std::find (heldNotes.begin(), heldNotes.end(), i) == heldNotes.end())
                     {
-                        for (int t = 0; t < 2; ++t)
-                            for (auto& v : voices[t])
-                                if (v.isActive() && v.getNote() == i) v.noteOff();
+                        releaseKey (i);
                         sustainHeld[i] = 0;
                     }
                 }
@@ -405,13 +544,13 @@ void NanoFrogProcessor::releaseArpNote()
 void NanoFrogProcessor::arpFireStep()
 {
     const auto& src = blockLatch ? arp.held : heldNotes;
-    static const double beats[6] = { 1.0, 0.5, 0.25, 1.0/3.0, 1.0/6.0, 0.125 };
-    int ri = juce::jlimit (0, 5, (int) pv (apvts, "arp_rate"));
+    static const double beats[7] = { 1.0, 0.5, 0.25, 1.0/3.0, 1.0/6.0, 0.125, 2.0/3.0 }; // last = 1/6
+    int ri = juce::jlimit (0, 6, (int) pv (apvts, "arp_rate"));
     double stepSec = 60.0 / juce::jmax (20.0, effBpm) * beats[ri];
     double stepSamples = juce::jmax (32.0, stepSec * fs);
     // Swing lengthens even steps and shortens odd ones (pairs keep the grid).
     float swing = juce::jlimit (-1.0f, 1.0f, pv (apvts, "arp_swing"));
-    double len = stepSamples * (1.0 + ((arp.step & 1) == 0 ? 0.5 : -0.5) * swing);
+    double len = stepSamples * (1.0 + ((arp.tick & 1) == 0 ? 0.5 : -0.5) * swing);
     int mode = (int) pv (apvts, "arp_mode");
     int octs = juce::jlimit (1, 4, (int) std::round (pv (apvts, "arp_octaves")));
 
@@ -426,25 +565,40 @@ void NanoFrogProcessor::arpFireStep()
     {
         // Up / Random use the full octave run; Alt modes bounce over it.
         for (int o = 0; o < octs; ++o) for (int x : notes) pattern.push_back (x + o * 12);
-        if (mode == 2 || mode == 3)
-        {
-            int upN = (int) pattern.size();
-            for (int i = upN - 2; i > 0; --i) pattern.push_back (pattern[(size_t) i]);
-            if (mode == 3) std::reverse (pattern.begin(), pattern.end());
-        }
+        // ALT1 turns at the ends without repeating them (C E G E), ALT2
+        // plays both end notes twice (C E G G E C)
+        int upN = (int) pattern.size();
+        if (mode == 2) for (int i = upN - 2; i > 0; --i) pattern.push_back (pattern[(size_t) i]);
+        else if (mode == 3) for (int i = upN - 1; i >= 0; --i) pattern.push_back (pattern[(size_t) i]);
     }
     if (pattern.empty()) return;
     if (arp.step >= (int) pattern.size()) arp.step = 0;
 
     releaseArpNote();
+    // LAST STEP cycle: a switched-off step is a rest (the pattern waits for
+    // the next step that plays)
+    const int lastStep = juce::jlimit (1, 8, (int) std::round (pv (apvts, "arp_last_step")));
+    if (arp.stepPos >= lastStep) arp.stepPos = 0;
+    static const char* stepIds[8] = { "arp_step1", "arp_step2", "arp_step3", "arp_step4",
+                                      "arp_step5", "arp_step6", "arp_step7", "arp_step8" };
+    const bool stepOn = pv (apvts, stepIds[arp.stepPos]) > 0.5f;
+    arp.stepPos = (arp.stepPos + 1) % lastStep;
+    ++arp.tick;
+    if (! stepOn)
+    {
+        arp.samplesToNext += len;
+        arpOffCountdown = 0.0;
+        return;
+    }
     float vel = lastVel;
     if (mode == 5) // trigger: whole chord each step
     {
         for (int x : notes)
             for (int t = 0; t < 2; ++t)
             {
-                int vi = allocateVoice (t, x, blockPoly[t]);
-                voices[t][vi].noteOn (x, vel, blockVp[t], false);
+                if (t == 1 && blockT2Off) continue;
+                if (blockAssign[t] != 0) monoNoteOn (t, x, vel, true); // a mono timbre plays the top of the chord
+                else startPolyVoice (t, x, vel);
             }
         arp.currentNote = -2;
     }
@@ -454,8 +608,9 @@ void NanoFrogProcessor::arpFireStep()
         int nn = juce::jlimit (0, 127, pattern[(size_t) idx]);
         for (int t = 0; t < 2; ++t)
         {
-            int vi = allocateVoice (t, nn, blockPoly[t]);
-            voices[t][vi].noteOn (nn, vel, blockVp[t], false);
+            if (t == 1 && blockT2Off) continue;
+            if (blockAssign[t] != 0) monoNoteOn (t, nn, vel, true);
+            else startPolyVoice (t, nn, vel);
         }
         arp.currentNote = nn;
     }
@@ -481,7 +636,7 @@ void NanoFrogProcessor::arpTick()
     {
         // fresh gesture: first step lands on the key press, not a stale phase
         arp.running = true;
-        arp.step = 0;
+        arp.step = 0; arp.stepPos = 0; arp.tick = 0;
         arp.samplesToNext = 0.0;
     }
     if (arpOffCountdown > 0.0)
@@ -509,6 +664,21 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     blockVp[1] = collectVoiceParams (1);
     blockPoly[0] = (int) std::round (pv (apvts, "voice_poly"));
     blockPoly[1] = (int) std::round (pv (apvts, "t2_voice_poly"));
+    for (int t = 0; t < 2; ++t)
+    {
+        const char* pre = t == 0 ? "" : "t2_";
+        char buf[64];
+        auto get = [&] (const char* id) { std::snprintf (buf, sizeof (buf), "%s%s", pre, id); return pv (apvts, buf); };
+        const int assign = (int) get ("voice_assign");
+        if (assign != blockAssign[t])
+            for (auto& v : voices[t]) v.noteOff(); // assign mode changed: let everything ring out
+        blockAssign[t] = assign;
+        blockTrigger[t] = (int) get ("voice_trigger");
+        blockPriority[t] = (int) get ("voice_priority");
+        blockUniDet[t] = get ("voice_unidet");
+        // envelope knob moves reach notes that are already sounding
+        for (auto& v : voices[t]) if (v.isActive()) v.updateEnvelopes (blockVp[t]);
+    }
     blockArpOn = pv (apvts, "arp_on") > 0.5f;
     blockLatch = pv (apvts, "arp_latch") > 0.5f;
     if (blockLatch && ! prevLatch) arp.held.assign (heldNotes.begin(), heldNotes.end());
@@ -534,6 +704,11 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // Per-block constants (hoisted out of the sample loop).
     float mix = juce::jlimit (0.0f, 1.0f, pv (apvts, "tmix"));
     const float t1 = std::cos (mix * 1.5707963f), t2 = std::sin (mix * 1.5707963f);
+    // Timbre Mix at 0: once the crossfade has settled, Timbre 2 is not rendered
+    // (and starts no notes) - half the voice work for a single-timbre sound
+    blockT2Off = mix <= 0.0f && tmixSm[1] < 1.0e-4f;
+    if (blockT2Off)
+        for (auto& v : voices[1]) if (v.isActive()) v.fastKill();
     const float mc = (float) std::exp (-1.0 / (0.005 * fs));
     const float wk = 1.0f - (float) std::exp (-1.0 / (0.008 * fs)); // wheel smoothing
 
@@ -557,7 +732,7 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 voices[0][v].renderSample (blockVp[0], bendSm, modSm, vl, vr);
                 s1l += vl; s1r += vr;
             }
-            if (voices[1][v].isActive())
+            if (! blockT2Off && voices[1][v].isActive())
             {
                 float vl, vr;
                 voices[1][v].renderSample (blockVp[1], bendSm, modSm, vl, vr);
@@ -569,9 +744,10 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         tmixSm[1] = tmixSm[1] * mc + t2 * (1.0f - mc);
         float sl = s1l * tmixSm[0] + s2l * tmixSm[1];
         float sr = s1r * tmixSm[0] + s2r * tmixSm[1];
-        // gentle voice-bus normalize + soft saturation (tames high-reso peaks)
-        L[i] = std::tanh (sl * 0.35f);
-        Rp[i] = std::tanh (sr * 0.35f);
+        // voice-bus normalize (linear: the mixer warmth stage in each voice and
+        // the master lookahead limiter carry the saturation / peak control)
+        L[i] = sl * 0.35f;
+        Rp[i] = sr * 0.35f;
     }
     for (; midiIt != midiEnd; ++midiIt) // stray events past the block end
         handleMidi ((*midiIt).getMessage());
@@ -580,18 +756,41 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     int mtype = (int) pv (apvts, "modfx_type");
     modfx.process (L, Rp, n, mtype, pv (apvts, "modfx_rate"), pv (apvts, "modfx_depth"), pv (apvts, "modfx_mix"));
     int dtype = (int) pv (apvts, "delay_type");
-    delay.process (L, Rp, n, dtype, pv (apvts, "delay_time"), pv (apvts, "delay_feedback"), pv (apvts, "delay_mix"));
+    // DELAY SYNC: a note value at the song / host tempo replaces the TIME knob
+    const int dsync = (int) pv (apvts, "delay_sync");
+    const float syncMs = dsync > 0 ? (float) (kSyncBeats[juce::jlimit (0, 14, dsync - 1)] * 60000.0 / juce::jmax (20.0, effBpm)) : -1.0f;
+    delay.process (L, Rp, n, dtype, pv (apvts, "delay_time"), pv (apvts, "delay_feedback"), pv (apvts, "delay_mix"), syncMs);
     eq.process (L, Rp, n, pv (apvts, "eq_low"), pv (apvts, "eq_high"));
     float out = pv (apvts, "output_level");
     bool limOn = pv (apvts, "limiter") > 0.5f;
+    // master: output level -> DC / subsonic cleanup (12 Hz one-pole) -> idle
+    // gate (6 s after the last voice, ramp to digital zero) -> lookahead
+    // limiter (-0.3 dBFS ceiling, same lookahead when off)
+    bool anyActive = false;
+    for (int t = 0; t < 2 && ! anyActive; ++t)
+        for (auto& v : voices[t]) if (v.isActive()) { anyActive = true; break; }
+    if (anyActive) idleSamples = 0; else idleSamples += n;
+    const bool shouldClose = idleSamples > (int) (6.0 * fs);
+    const float gateStep = 1.0f / (float) (0.05 * fs);
+    const float dcR = 1.0f - (float) (2.0 * 3.14159265358979 * 12.0 / fs);
+    for (int i = 0; i < n; ++i)
+    {
+        if (shouldClose) gateG = juce::jmax (0.0f, gateG - gateStep); else gateG = 1.0f;
+        float x[2] = { L[i] * out, Rp[i] * out };
+        for (int c = 0; c < 2; ++c)
+        {
+            const float y = x[c] - dcX[c] + dcR * dcY[c];
+            dcX[c] = x[c]; dcY[c] = y;
+            x[c] = y * gateG;
+        }
+        L[i] = x[0]; Rp[i] = x[1];
+    }
+    limiter.process (L, Rp, n, 0.9661f, limOn);
     float peakL = 0.0f, peakR = 0.0f;
     for (int i = 0; i < n; ++i)
     {
-        float sl = L[i] * out, sr = Rp[i] * out;
-        if (limOn) { sl = std::tanh (sl); sr = std::tanh (sr); }
-        L[i] = sl; Rp[i] = sr;
-        peakL = juce::jmax (peakL, std::abs (sl));
-        peakR = juce::jmax (peakR, std::abs (sr));
+        peakL = juce::jmax (peakL, std::abs (L[i]));
+        peakR = juce::jmax (peakR, std::abs (Rp[i]));
     }
     outSmoothL = outSmoothL * 0.9f + peakL * 0.1f;
     outSmoothR = outSmoothR * 0.9f + peakR * 0.1f;
@@ -643,9 +842,29 @@ juce::StringArray NanoFrogProcessor::getFactoryNames() const
     return a;
 }
 
+int NanoFrogProcessor::mutateGroup (const juce::String& b)
+{
+    if (b.startsWith ("osc") || b == "fm_amt" || b == "voice_detune") return MG_OSC;
+    if (b.startsWith ("mix_")) return MG_MIXER;
+    if (b.startsWith ("filter_")) return MG_FILTER;
+    if (b.startsWith ("amp_") || b.startsWith ("env")) return MG_AMP_EG;
+    if (b.startsWith ("lfo")) return MG_LFO;
+    if (b.startsWith ("mod") && ! b.startsWith ("modfx")) return MG_PATCH;
+    if (b.startsWith ("modfx") || b.startsWith ("delay") || b.startsWith ("eq_")) return MG_FX;
+    if (b.startsWith ("arp")) return MG_ARP;
+    return -1;
+}
+
+void NanoFrogProcessor::setMutateLocked (int g, bool locked)
+{
+    int m = (int) apvts.state.getProperty ("mutateLocks", 0);
+    apvts.state.setProperty ("mutateLocks", locked ? (m | (1 << g)) : (m & ~(1 << g)), nullptr);
+}
+
 void NanoFrogProcessor::mutateCurrentPatch()
 {
-    // Message thread only (driven by the header MUTATE button).
+    // Message thread only (driven by the header MUTATE button). One undo step.
+    auto step = undoStep();
     juce::StringArray tags;
     if (currentPreset >= 0 && currentPreset < PresetBank::count())
         tags = PresetBank::get (currentPreset).tags;
@@ -713,7 +932,13 @@ void NanoFrogProcessor::mutateCurrentPatch()
             || base == "voice_poly" || base == "voice_portamento"
             || base == "voice_vib" || base == "output_level"
             || base == "master_tune" || base == "song_tempo" || base == "tmix"
-            || base == "modfx_type" || base == "delay_type";
+            || base == "modfx_type" || base == "delay_type"
+            || base.startsWith ("voice_assign") || base == "voice_trigger" || base == "voice_priority"
+            || base.endsWith ("_keysync") || base.startsWith ("arp_step") || base == "arp_last_step"
+            || base == "bend_range" || base == "delay_sync"
+            // pitch never moves: fine tune, detune spread, unison width, vibrato
+            || base.endsWith ("_fine") || base == "voice_detune" || base == "voice_unidet"
+            || base == "voice_vib";
     };
     auto isAdsr = [&] (const juce::String& base)
     {
@@ -745,12 +970,20 @@ void NanoFrogProcessor::mutateCurrentPatch()
         return 0.06;
     };
 
+    auto ti_of = [] (const juce::String& pid) { return pid.startsWith ("t2_"); };
     for (int i = 0; i < PresetBank::kParamCount; ++i)
     {
         juce::String id = PresetBank::kParamIds[i];
         juce::String base = id.startsWith ("t2_") ? id.substring (3) : id;
         if (warranted (base)) continue;
         if (freezeAdsr && isAdsr (base)) continue;
+        if (const int g = mutateGroup (base); g >= 0 && isMutateLocked (g)) continue; // locked section
+        if (base.startsWith ("mod") && base.endsWith ("_amt") && base[3] >= '1' && base[3] <= '4')
+        {
+            // a patch slot aimed at PITCH / OSC2 PITCH keeps its depth
+            const int dst = (int) std::round (rawOf ((ti_of (id) ? "t2_" : "") + base.substring (0, 4) + "_dst"));
+            if (dst == 0 || dst == 1) continue;
+        }
         // Never wake a bypassed module: same modules, different flavour.
         int ti = id.startsWith ("t2_") ? 1 : 0;
         bool gated = false;
@@ -811,6 +1044,7 @@ void NanoFrogProcessor::mutateCurrentPatch()
 
 void NanoFrogProcessor::applyPreset (int index)
 {
+    auto step = undoStep(); // a preset load is one undo step
     PresetBank::apply (apvts, PresetBank::get (index).values);
     currentPreset = index;
     currentUser.clear(); // back on a factory voice
@@ -820,6 +1054,7 @@ bool NanoFrogProcessor::loadUserPreset (const juce::File& file)
 {
     NanoPreset np;
     if (! PresetBank::readUser (file, np)) return false;
+    auto step = undoStep();
     PresetBank::apply (apvts, np.values);
     currentPreset = -1;
     currentUser = file.getFileName();
@@ -851,6 +1086,19 @@ void NanoFrogProcessor::setStateInformation (const void* data, int sizeInBytes)
         if (xml->hasTagName (apvts.state.getType()))
         {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            // projects from before VOICE ASSIGN: a polyphony of 1 was the mono voice
+            for (auto pre : { "", "t2_" })
+            {
+                const juce::String aid = juce::String (pre) + "voice_assign", pid = juce::String (pre) + "voice_poly";
+                bool hasAssign = false; float poly = 2.0f;
+                for (auto* c : xml->getChildIterator())
+                {
+                    if (c->getStringAttribute ("id") == aid) hasAssign = true;
+                    if (c->getStringAttribute ("id") == pid) poly = (float) c->getDoubleAttribute ("value", 2.0);
+                }
+                if (! hasAssign && poly < 1.5f)
+                    if (auto* p = apvts.getParameter (aid)) p->setValueNotifyingHost (p->convertTo0to1 (1.0f));
+            }
             currentPreset = (int) xml->getIntAttribute ("currentPreset", 0);
             currentUser.clear();
             juce::String userFile = xml->getStringAttribute ("userPreset");
@@ -888,6 +1136,7 @@ void NanoFrogProcessor::setStateInformation (const void* data, int sizeInBytes)
                 {
                     int inactive = 1 - bankActive.load();
                     std::memcpy (bankBuf[inactive][0], mos.getData(), sizeof (bankBuf[0][0]));
+                    buildUserMips (bankBuf[inactive][0], bankMip[inactive][0]);
                     bankNames[0] = xml->getStringAttribute ("userWaveName", "Restored wave");
                     bankActive.store (inactive);
                     bankCount.store (1);
@@ -1066,10 +1315,46 @@ bool NanoFrogProcessor::makeSingleCycle (const float* monoSrc, int numFrames, fl
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new NanoFrogProcessor(); }
 
+// Band-limited copies of a 2048-sample user wave (UserMip layout): level k
+// keeps harmonics 1 .. 1024 >> k, resynthesised by an inverse FFT at the
+// level's own table length (message thread).
+void NanoFrogProcessor::buildUserMips (const float* src, float* dst)
+{
+    juce::dsp::FFT fwd (11); // 2048
+    std::vector<float> spec (4096, 0.0f);
+    std::copy (src, src + 2048, spec.begin());
+    fwd.performRealOnlyForwardTransform (spec.data());
+    for (int k = 0; k < OscCore::kMipLevels; ++k)
+    {
+        const int len = OscCore::mipLen (k);
+        const int order = (int) std::lround (std::log2 ((double) len));
+        const int maxH = juce::jmin (1024 >> k, len / 2 - 1);
+        juce::dsp::FFT inv (order);
+        std::vector<float> b ((size_t) len * 2, 0.0f);
+        for (int h = 1; h <= maxH; ++h)
+        {
+            b[(size_t) (2 * h)] = spec[(size_t) (2 * h)];
+            b[(size_t) (2 * h + 1)] = spec[(size_t) (2 * h + 1)];
+            b[(size_t) (2 * (len - h))] = spec[(size_t) (2 * h)];          // conjugate half, for
+            b[(size_t) (2 * (len - h) + 1)] = -spec[(size_t) (2 * h + 1)]; // backends that read it
+        }
+        inv.performRealOnlyInverseTransform (b.data());
+        // the inverse's scaling differs between FFT backends: measure it
+        std::vector<float> imp ((size_t) len * 2, 0.0f);
+        imp[0] = 1.0f;
+        inv.performRealOnlyForwardTransform (imp.data());
+        inv.performRealOnlyInverseTransform (imp.data());
+        const float toLevel = (std::abs (imp[0]) > 1.0e-12f ? 1.0f / imp[0] : 1.0f) * (float) len / 2048.0f;
+        float* lv = dst + OscCore::mipOffset (k);
+        for (int n = 0; n < len; ++n) lv[n] = b[(size_t) n] * toLevel;
+    }
+}
+
 bool NanoFrogProcessor::importUserWave (const float* monoSrc, int numFrames, const juce::String& name)
 {
     int inactive = 1 - bankActive.load();
     if (! makeSingleCycle (monoSrc, numFrames, bankBuf[inactive][0])) return false;
+    buildUserMips (bankBuf[inactive][0], bankMip[inactive][0]);
     bankNames[0] = name;
     bankActive.store (inactive);
     bankCount.store (1);
@@ -1111,6 +1396,7 @@ int NanoFrogProcessor::importUserFolder (const juce::String& folderPath)
         reader->read (&buf, 0, n, 0, true, false);
         if (! makeSingleCycle (buf.getReadPointer (0), n, bankBuf[inactive][loaded]))
             continue;
+        buildUserMips (bankBuf[inactive][loaded], bankMip[inactive][loaded]);
         names[loaded] = f.getFileNameWithoutExtension();
         ++loaded;
     }

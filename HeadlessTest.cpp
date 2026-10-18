@@ -361,170 +361,19 @@ int main()
         printf ("  direct probe mix_o1: raw=%.6f norm=%.6f (want raw 0.787400)\n",
                 raw, p->getValue());
     }
-    static const char* kIds[152] = {
-        "osc1_wave",
-        "osc1_digital",
-        "osc1_octave",
-        "osc1_pitch",
-        "osc1_fine",
-        "osc1_level",
-        "osc1_shape",
-        "osc1_pwm",
-        "osc1_xmod",
-        "osc_mod",
-        "osc2_wave",
-        "osc2_octave",
-        "osc2_pitch",
-        "osc2_fine",
-        "osc2_level",
-        "mix_o1",
-        "mix_o2",
-        "mix_noise",
-        "fm_amt",
-        "filter_type",
-        "filter_cutoff",
-        "filter_reso",
-        "filter_keytrack",
-        "filter_envamt",
-        "amp_level",
-        "amp_pan",
-        "amp_velocity",
-        "amp_dist",
-        "amp_drive",
-        "env1_a",
-        "env1_d",
-        "env1_s",
-        "env1_r",
-        "env2_a",
-        "env2_d",
-        "env2_s",
-        "env2_r",
-        "lfo1_wave",
-        "lfo1_rate",
-        "lfo1_depth",
-        "lfo1_sync",
-        "lfo2_wave",
-        "lfo2_rate",
-        "lfo2_depth",
-        "lfo2_sync",
-        "mod1_src",
-        "mod1_dst",
-        "mod1_amt",
-        "mod2_src",
-        "mod2_dst",
-        "mod2_amt",
-        "mod3_src",
-        "mod3_dst",
-        "mod3_amt",
-        "mod4_src",
-        "mod4_dst",
-        "mod4_amt",
-        "modfx_type",
-        "modfx_rate",
-        "modfx_depth",
-        "modfx_mix",
-        "delay_type",
-        "delay_time",
-        "delay_feedback",
-        "delay_mix",
-        "eq_low",
-        "eq_high",
-        "arp_on",
-        "arp_mode",
-        "arp_rate",
-        "arp_gate",
-        "arp_octaves",
-        "arp_swing",
-        "arp_latch",
-        "voice_poly",
-        "voice_detune",
-        "voice_portamento",
-        "voice_vib",
-        "output_level",
-        "master_tune",
-        "song_tempo",
-        "osc2_shape",
-        "osc2_pwm",
-        "osc2_digital",
-        "osc2_xmod",
-        "t2_osc1_wave",
-        "t2_osc1_digital",
-        "t2_osc1_octave",
-        "t2_osc1_pitch",
-        "t2_osc1_fine",
-        "t2_osc1_level",
-        "t2_osc1_shape",
-        "t2_osc1_pwm",
-        "t2_osc1_xmod",
-        "t2_osc_mod",
-        "t2_osc2_wave",
-        "t2_osc2_octave",
-        "t2_osc2_pitch",
-        "t2_osc2_fine",
-        "t2_osc2_level",
-        "t2_mix_o1",
-        "t2_mix_o2",
-        "t2_mix_noise",
-        "t2_fm_amt",
-        "t2_filter_type",
-        "t2_filter_cutoff",
-        "t2_filter_reso",
-        "t2_filter_keytrack",
-        "t2_filter_envamt",
-        "t2_amp_level",
-        "t2_amp_pan",
-        "t2_amp_velocity",
-        "t2_amp_dist",
-        "t2_amp_drive",
-        "t2_env1_a",
-        "t2_env1_d",
-        "t2_env1_s",
-        "t2_env1_r",
-        "t2_env2_a",
-        "t2_env2_d",
-        "t2_env2_s",
-        "t2_env2_r",
-        "t2_lfo1_wave",
-        "t2_lfo1_rate",
-        "t2_lfo1_depth",
-        "t2_lfo1_sync",
-        "t2_lfo2_wave",
-        "t2_lfo2_rate",
-        "t2_lfo2_depth",
-        "t2_lfo2_sync",
-        "t2_mod1_src",
-        "t2_mod1_dst",
-        "t2_mod1_amt",
-        "t2_mod2_src",
-        "t2_mod2_dst",
-        "t2_mod2_amt",
-        "t2_mod3_src",
-        "t2_mod3_dst",
-        "t2_mod3_amt",
-        "t2_mod4_src",
-        "t2_mod4_dst",
-        "t2_mod4_amt",
-        "t2_voice_poly",
-        "t2_voice_detune",
-        "t2_voice_portamento",
-        "t2_voice_vib",
-        "t2_osc2_shape",
-        "t2_osc2_pwm",
-        "t2_osc2_digital",
-        "t2_osc2_xmod",
-        "tmix",
-        "limiter"
-    };
+    const char* const* kIds = PresetBank::kParamIds; // canonical order (bank files map by id)
+    constexpr int kNIds = PresetBank::kParamCount;
     auto checkPreset = [&] (int idx) -> int
     {
         CHECK (proc->getCurrentProgram() == idx, "current program %d after set %d",
                proc->getCurrentProgram(), idx);
         const auto& pr = PresetBank::get (idx);
         int mism = 0;
-        for (int k = 0; k < 152; ++k)
+        for (int k = 0; k < kNIds; ++k)
         {
             float actual = 0.0f;
             if (auto* pv = proc->apvts.getRawParameterValue (kIds[k])) actual = pv->load();
+            if (! std::isfinite (pr.values[k])) continue; // not in the bank file: default
             if (std::abs (actual - pr.values[k]) > 1e-3f)
             {
                 if (mism < 5)
@@ -533,7 +382,7 @@ int main()
                 ++mism;
             }
         }
-        CHECK (mism == 0, "preset %d (%s): %d/152 params mismatch", idx, pr.name.toRawUTF8(), mism);
+        CHECK (mism == 0, "preset %d (%s): %d params mismatch", idx, pr.name.toRawUTF8(), mism);
         printf ("preset %3d (%s): round-trip %s\n", idx, pr.name.toRawUTF8(), mism == 0 ? "ok" : "FAILED");
         return mism;
     };
@@ -545,13 +394,14 @@ int main()
         for (int idx = 0; idx < nProg; ++idx)
         {
             const auto& pr = PresetBank::get (idx);
-            for (int k = 0; k < 152; ++k)
-                if (auto* p = proc->apvts.getParameter (kIds[k]))
+            for (int k = 0; k < kNIds; ++k)
+                if (auto* p = proc->apvts.getParameter (kIds[k]); p != nullptr && std::isfinite (pr.values[k]))
                     p->setValueNotifyingHost (p->convertTo0to1 (pr.values[k]));
-            for (int k = 0; k < 152; ++k)
+            for (int k = 0; k < kNIds; ++k)
             {
                 float actual = 0.0f;
                 if (auto* pv = proc->apvts.getRawParameterValue (kIds[k])) actual = pv->load();
+                if (! std::isfinite (pr.values[k])) continue;
                 if (std::abs (actual - pr.values[k]) > 1e-3f && bad < 5)
                     printf ("  bank mismatch preset %d param %s: got %.4f want %.4f\n",
                             idx, kIds[k], actual, pr.values[k]);
@@ -1286,14 +1136,211 @@ int main()
         std::set<juce::String> ids;
         for (int i = 0; i < st.getNumChildren(); ++i)
             ids.insert (st.getChild (i).getProperty ("id").toString());
-        CHECK ((int) ids.size() == 152, "unique param ids %d, expected 152", (int) ids.size());
-        for (int k = 0; k < 152; ++k)
+        CHECK ((int) ids.size() == kNIds, "unique param ids %d, expected %d", (int) ids.size(), kNIds);
+        for (int k = 0; k < kNIds; ++k)
             if (proc->apvts.getParameter (kIds[k]) == nullptr)
             {
                 CHECK (false, "kIds[%d] %s missing from APVTS", k, kIds[k]);
                 break;
             }
         printf ("param registry: %d unique ids\n", (int) ids.size());
+    }
+
+    // ---- voice assign, unipolar patch, bend / delay sync, arp, filter, undo ----
+    {
+        juce::MessageManager::getInstance(); // undo records message-thread gestures
+        auto fresh = []
+        {
+            auto q = std::make_unique<NanoFrogProcessor>();
+            q->setRateAndBufferSizeDetails (44100.0, 512);
+            q->prepareToPlay (44100.0, 512);
+            PresetBank::resetToDefaults (q->apvts);
+            return q;
+        };
+        auto set = [] (NanoFrogProcessor& q, const juce::String& id, float plain)
+        {
+            if (auto* p = q.apvts.getParameter (id)) p->setValueNotifyingHost (p->convertTo0to1 (plain));
+        };
+        // render `blocks` of 512 with scheduled events (sample, msg)
+        auto run = [] (NanoFrogProcessor& q, int blocks, std::vector<std::pair<int, juce::MidiMessage>> ev)
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> b (2, 512);
+            for (int k = 0; k < blocks; ++k)
+            {
+                juce::MidiBuffer m;
+                for (auto& e : ev) if (e.first >= k * 512 && e.first < (k + 1) * 512) m.addEvent (e.second, e.first - k * 512);
+                b.clear(); q.processBlock (b, m);
+                for (int i = 0; i < 512; ++i) out.push_back (0.5f * (b.getSample (0, i) + b.getSample (1, i)));
+            }
+            return out;
+        };
+        auto rms = [] (const std::vector<float>& v, int a, int n) { double s = 0; for (int i = a; i < a + n; ++i) s += (double) v[(size_t) i] * v[(size_t) i]; return std::sqrt (s / n); };
+        auto freqAt = [] (const std::vector<float>& v, int a, int n) { int z = 0; for (int i = a + 1; i < a + n; ++i) if ((v[(size_t) i - 1] < 0) != (v[(size_t) i] < 0)) ++z; return z * 44100.0 / (2.0 * n); };
+        auto on = [] (int n, float v = 0.8f) { return juce::MidiMessage::noteOn (1, n, v); };
+        auto off = [] (int n) { return juce::MidiMessage::noteOff (1, n); };
+        const int sr = 44100;
+
+        // Mono, Single trigger: an overlapping key slides without restarting a
+        // decaying envelope; Multi restarts it
+        auto decayCase = [&] (int trig)
+        {
+            auto q = fresh();
+            set (*q, "voice_assign", 1); set (*q, "voice_trigger", (float) trig);
+            set (*q, "env2_d", 0.35f); set (*q, "env2_s", 0.0f);
+            auto o = run (*q, 60, { { 0, on (60) }, { sr / 2, on (64) } });
+            return rms (o, sr / 2 + 2000, 4000) / rms (o, 1000, 4000);
+        };
+        const double single = decayCase (0), multi = decayCase (1);
+        printf ("mono legato: level after the second key %.3f (Single) vs %.3f (Multi)\n", single, multi);
+        CHECK (single < 0.3 && multi > 0.6, "mono Single trigger slides legato, Multi retriggers (%.3f / %.3f)", single, multi);
+
+        // note priority LOW: a higher second key doesn't take over
+        {
+            auto q = fresh();
+            set (*q, "voice_assign", 1); set (*q, "voice_priority", 1); set (*q, "osc1_wave", 3);
+            auto o = run (*q, 100, { { 0, on (57) }, { sr / 4, on (69) } });
+            const double f = freqAt (o, sr / 2, 8000);
+            CHECK (std::abs (f - 220.0) < 6.0, "Low note priority keeps the low key (%.1f Hz)", f);
+            auto q2 = fresh();
+            set (*q2, "voice_assign", 1); set (*q2, "osc1_wave", 3);
+            auto o2 = run (*q2, 100, { { 0, on (57) }, { sr / 4, on (69) }, { sr / 2, off (69) } });
+            const double back = freqAt (o2, sr / 2 + 4000, 8000);
+            CHECK (std::abs (back - 220.0) < 6.0, "Last priority falls back to the held key on release (%.1f Hz)", back);
+        }
+        // unison: four detuned voices around the key
+        {
+            auto q = fresh();
+            set (*q, "voice_assign", 2); set (*q, "voice_unidet", 30.0f); set (*q, "osc1_wave", 3);
+            auto o = run (*q, 100, { { 0, on (57) } });
+            const double f = freqAt (o, 8000, 16000);
+            auto q1 = fresh(); set (*q1, "osc1_wave", 3);
+            auto o1 = run (*q1, 40, { { 0, on (57) } });
+            // the stack beats: its level wanders where a single voice is steady
+            double lo = 1e9, hi = 0;
+            for (int a = 4000; a + 2205 < (int) o.size(); a += 2205) { const double r = rms (o, a, 2205); lo = std::min (lo, r); hi = std::max (hi, r); }
+            printf ("unison: %.1f Hz centre, level %.3f..%.3f\n", f, lo, hi);
+            CHECK (std::abs (f - 220.0) < 8.0 && hi > 1.3 * lo, "unison stacks detuned voices around the key");
+            juce::ignoreUnused (o1);
+        }
+        // patch PITCH moves both oscillators; ENV2 (unipolar) sits at 1 while held
+        {
+            auto q = fresh();
+            set (*q, "osc1_level", 0.0f); set (*q, "osc2_level", 1.0f); set (*q, "mix_o2", 1.0f); set (*q, "osc2_wave", 2);
+            set (*q, "mod1_src", 1); set (*q, "mod1_dst", 0); set (*q, "mod1_amt", 1.0f / 12.0f);
+            set (*q, "mod2_amt", 0.0f); set (*q, "mod3_amt", 0.0f); set (*q, "mod4_amt", 0.0f);
+            auto o = run (*q, 100, { { 0, on (57) } });
+            const double f = freqAt (o, sr / 2, 8000);
+            CHECK (std::abs (f / 220.0 - std::pow (2.0, 1.0 / 12.0)) < 0.02, "PITCH destination moves OSC2 too (unipolar ENV2: +1 st, %.1f Hz)", f);
+        }
+        // bend range
+        {
+            auto q = fresh();
+            set (*q, "bend_range", 12.0f); set (*q, "osc1_wave", 3);
+            auto o = run (*q, 100, { { 0, juce::MidiMessage::pitchWheel (1, 16383) }, { 0, on (57) } });
+            const double f = freqAt (o, sr / 2, 8000);
+            CHECK (std::abs (f - 440.0) < 10.0, "bend range 12 bends an octave (%.1f Hz)", f);
+        }
+        // delay sync: 1/4 at 120 BPM = 500 ms
+        {
+            auto q = fresh();
+            set (*q, "song_tempo", 120.0f); set (*q, "delay_sync", 7); set (*q, "delay_mix", 1.0f); set (*q, "delay_feedback", 0.0f);
+            set (*q, "env2_d", 0.05f); set (*q, "env2_s", 0.0f); set (*q, "env2_r", 0.02f);
+            auto o = run (*q, 90, { { 0, on (60) }, { 600, off (60) } });
+            int echo = -1;
+            for (int i = 8000; i < (int) o.size(); ++i) if (std::abs (o[(size_t) i]) > 0.02f) { echo = i; break; }
+            printf ("delay sync echo at %.0f ms\n", echo * 1000.0 / sr);
+            CHECK (std::abs (echo * 1000.0 / sr - 500.0) < 25.0, "1/4 delay sync echoes at 500 ms (%.0f ms)", echo * 1000.0 / sr);
+        }
+        // arp ALT2 repeats the end notes; switched-off steps are rests
+        {
+            auto q = fresh();
+            set (*q, "osc1_wave", 3); set (*q, "arp_on", 1); set (*q, "arp_mode", 3); set (*q, "arp_rate", 1); // 1/8
+            set (*q, "song_tempo", 120.0f); set (*q, "arp_gate", 0.9f);
+            auto o = run (*q, 160, { { 0, on (57) }, { 0, on (61) }, { 0, on (64) } });
+            const int step = sr / 4; // 1/8 at 120
+            int notes[6];
+            for (int k = 0; k < 6; ++k)
+            {
+                const double f = freqAt (o, k * step + 2000, 6000);
+                notes[k] = (int) std::lround (69.0 + 12.0 * std::log2 (f / 440.0));
+            }
+            printf ("alt2 steps: %d %d %d %d %d %d\n", notes[0], notes[1], notes[2], notes[3], notes[4], notes[5]);
+            CHECK (notes[0] == 57 && notes[1] == 61 && notes[2] == 64 && notes[3] == 64 && notes[4] == 61 && notes[5] == 57,
+                   "Alt2 runs up and down repeating both end notes");
+            auto q2 = fresh();
+            set (*q2, "osc1_wave", 3); set (*q2, "arp_on", 1); set (*q2, "arp_rate", 1); set (*q2, "song_tempo", 120.0f);
+            set (*q2, "arp_last_step", 4.0f); set (*q2, "arp_step2", 0.0f); set (*q2, "env2_r", 0.01f);
+            auto o2 = run (*q2, 160, { { 0, on (57) } });
+            // LAST STEP 4 with step 2 off: steps 1 3 4 | 5 7 8 play, 2 and 6 rest
+            const double played = rms (o2, 0 * step + 2000, 6000), rest = rms (o2, 1 * step + 4000, 4000);
+            const double again = rms (o2, 4 * step + 2000, 6000), rest6 = rms (o2, 5 * step + 4000, 4000);
+            printf ("arp steps: %.3f rest %.4f | %.3f rest %.4f\n", played, rest, again, rest6);
+            CHECK (played > 0.02 && rest < 0.1 * played && again > 0.02 && rest6 < 0.1 * again,
+                   "a switched-off step is a rest, and LAST STEP 4 repeats the pattern");
+        }
+        // user waves: mipmapped tables keep the level of the imported cycle
+        {
+            std::vector<float> saw (2048);
+            for (int i = 0; i < 2048; ++i) saw[(size_t) i] = 1.0f - 2.0f * (float) i / 2048.0f;
+            auto q = fresh();
+            CHECK (q->importUserWave (saw.data(), 2048, "test saw"), "user wave import");
+            set (*q, "osc1_wave", 6); set (*q, "osc1_digital", 128);
+            auto user = run (*q, 40, { { 0, on (60) } });
+            auto qs = fresh();
+            set (*qs, "osc1_wave", 0);
+            auto plain = run (*qs, 40, { { 0, on (60) } });
+            const double d = 20.0 * std::log10 (rms (user, 4000, 12000) / juce::jmax (1e-9, rms (plain, 4000, 12000)));
+            auto qh = fresh();
+            qh->importUserWave (saw.data(), 2048, "test saw");
+            set (*qh, "osc1_wave", 6); set (*qh, "osc1_digital", 128);
+            auto high = run (*qh, 40, { { 0, on (108) } });
+            bool fin = true; for (float x : high) fin = fin && std::isfinite (x);
+            printf ("user saw vs built-in saw: %+.1f dB\n", d);
+            CHECK (std::abs (d) < 4.0 && fin, "user wave mipmaps keep the level (%+.1f dB) and play up top", d);
+        }
+        // LP24 and LP12 resonance peaks line up
+        {
+            auto peak = [] (int type)
+            {
+                SvFilter f; f.setSampleRate (44100.0);
+                juce::Random r (3); double s = 0;
+                for (int i = 0; i < 44100; ++i) { float y = f.process (type, 1000.0f, 1.0f, (r.nextFloat() * 2.0f - 1.0f) * 0.1f); if (i > 2000) s += (double) y * y; }
+                return 10.0 * std::log10 (s);
+            };
+            const double d = peak (0) - peak (1);
+            printf ("LP24 vs LP12 at full resonance: %+.1f dB\n", d);
+            CHECK (std::abs (d) < 4.0, "LP24 resonance level matches LP12 (%+.1f dB)", d);
+        }
+        // undo a knob gesture; MUTATE leaves locked sections alone
+        {
+            auto q = fresh();
+            auto* cut = q->apvts.getParameter ("filter_cutoff");
+            const float before = cut->getValue();
+            cut->beginChangeGesture(); cut->setValueNotifyingHost (0.3f); cut->endChangeGesture();
+            q->undoEdit();
+            CHECK (std::abs (cut->getValue() - before) < 1e-5f, "undo a knob gesture");
+            q->redoEdit();
+            q->setMutateLocked (NanoFrogProcessor::MG_FILTER, true);
+            const float res = q->apvts.getParameter ("filter_reso")->getValue();
+            for (int k = 0; k < 5; ++k) q->mutateCurrentPatch();
+            CHECK (std::abs (cut->getValue() - 0.3f) < 1e-5f && q->apvts.getParameter ("filter_reso")->getValue() == res,
+                   "MUTATE never touches a locked section");
+            q->undoEdit();
+            CHECK (q->canRedo(), "MUTATE is an undo step");
+            {
+                auto qp = fresh();
+                set (*qp, "mod1_src", 2); set (*qp, "mod1_dst", 0); set (*qp, "mod1_amt", 0.2f); set (*qp, "lfo1_depth", 0.5f);
+                set (*qp, "osc1_fine", 3.0f); set (*qp, "voice_detune", 0.3f);
+                const char* ids[] = { "osc1_octave", "osc1_pitch", "osc1_fine", "osc2_octave", "osc2_pitch", "osc2_fine",
+                                      "voice_detune", "voice_unidet", "voice_vib", "mod1_amt", "master_tune" };
+                float before[11]; for (int k = 0; k < 11; ++k) before[k] = qp->apvts.getRawParameterValue (ids[k])->load();
+                bool same = true;
+                for (int n = 0; n < 20; ++n) qp->mutateCurrentPatch();
+                for (int k = 0; k < 11; ++k) same = same && qp->apvts.getRawParameterValue (ids[k])->load() == before[k];
+                CHECK (same, "MUTATE never touches pitch (tune, detune, vibrato, pitch-routed patch slots)");
+            }
+        }
     }
 
     // ---- control self-test: drive every control, param must follow ----

@@ -109,3 +109,11 @@ target_link_libraries(NanoFrogHeadlessTest PRIVATE
     juce::juce_gui_extra
     PUBLIC juce::juce_recommended_config_flags
 )
+
+# HostCheck: loads the built NanoFrog.vst3 through JUCE's VST3 hosting (dev only, CI)
+#   ./build/HostCheck build/NanoFrog_artefacts/Release/VST3/NanoFrog.vst3
+add_executable(HostCheck HostCheck.cpp)
+target_include_directories(HostCheck PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/NanoFrog_artefacts/JuceLibraryCode)
+target_link_libraries(HostCheck PRIVATE juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
+target_compile_definitions(HostCheck PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1)
+add_dependencies(HostCheck NanoFrog)

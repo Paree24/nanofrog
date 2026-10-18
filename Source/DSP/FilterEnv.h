@@ -2,7 +2,9 @@
 #include <cmath>
 
 // TPT state-variable filter with LP12/HP12/BP12 taps.
-// LP24 = two LP12 stages in series. Stable, no self-oscillation blowup.
+// LP24 = two LP12 stages in series: a flat (Butterworth) first stage and the
+// resonant second one, so the LP24 peak matches LP12's (two resonant stages
+// stacked the peaks to +41 dB against LP12's +21.6). Stable, no blowup.
 class SvFilter
 {
 public:
@@ -22,24 +24,32 @@ public:
         if (g > 4.0f) g = 4.0f;
         float a1 = 1.0f / (1.0f + g * (g + k));
         // stage helper
-        auto stage = [&] (double& ic1, double& ic2, float x, float& lp, float& bp, float& hp)
+        auto stageK = [&] (double& ic1, double& ic2, float x, float kk, float aa, float& lp, float& bp, float& hp)
         {
             float v3 = x - ic2;
-            float v1 = a1 * ic1 + a1 * g * v3;
+            float v1 = aa * ic1 + aa * g * v3;
             float v2 = ic2 + g * v1;
             ic1 = 2.0f * v1 - ic1;
             ic2 = 2.0f * v2 - ic2;
-            lp = v2; bp = v1; hp = x - k * v1 - v2;
+            lp = v2; bp = v1; hp = x - kk * v1 - v2;
+        };
+        auto stage = [&] (double& ic1, double& ic2, float x, float& lp, float& bp, float& hp)
+        {
+            stageK (ic1, ic2, x, k, a1, lp, bp, hp);
         };
         float lp = 0, bp = 0, hp = 0;
         if (type == 0) // LP24: two LP12 in series (48dB? we use 2 stages = 24dB)
         {
             float l1, b1, h1, l2, b2, h2;
-            stage (s1, s2, in, l1, b1, h1);
+            const float kFlat = 1.41421356f, aFlat = 1.0f / (1.0f + g * (g + kFlat));
+            stageK (s1, s2, in, kFlat, aFlat, l1, b1, h1);
             // slight interstage saturation for analog feel
             float driven = std::tanh (l1 * 1.1f);
             stage (s3, s4, driven, l2, b2, h2);
-            return l2;
+            // the flat stage sits -3 dB at the cutoff: make it up so the
+            // resonant peak lands where LP12's does
+            const float mk = 1.0f + 0.41421356f * reso01 * reso01;
+            return l2 * mk;
         }
         stage (s1, s2, in, lp, bp, hp);
         s3 = s4 = 0.0;
@@ -125,6 +135,8 @@ public:
     void setSampleRate (double sr) { fs = sr; }
     void reset() { phase = 0.0; current = 0.0f; target = 1.0f; }
     void keySync (bool toZero) { if (toZero) { phase = 0.0; pickRandom(); } }
+    double getPhase() const { return phase; }
+    void setPhase (double p) { phase = p - std::floor (p); }
 
     inline float tick (int wave, double freqHz, bool /*tempoSyncIgnored*/)
     {

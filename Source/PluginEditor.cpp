@@ -47,6 +47,8 @@ static juce::String fmtVal (const juce::String& pidIn, float v)
         || pid == "osc1_fine" || pid == "osc2_fine" || pid == "master_tune"
         || pid == "voice_poly" || pid == "arp_octaves" || pid == "song_tempo")
         return juce::String ((int) std::round (v));
+    if (pid == "voice_unidet") return juce::String ((int) std::round (v)) + " ct";
+    if (pid == "bend_range") return juce::String::fromUTF8 ("\xc2\xb1") + juce::String ((int) std::round (v)) + " st";
     if (pid == "filter_keytrack" || pid == "filter_envamt" || pid == "arp_swing"
         || pid == "mod1_amt" || pid == "mod2_amt" || pid == "mod3_amt" || pid == "mod4_amt")
         return pctS (v);
@@ -262,6 +264,24 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
         tabs[i]->onClick = [this, i] { selectPage (i); };
     }
     addToggle (this, "limiter", "LIMITER", 1090, 11, 84, 24);
+    for (auto* b : { &undoBtn, &redoBtn, &locksBtn }) addAndMakeVisible (b);
+    undoBtn.setBounds (898, 11, 58, 24);
+    redoBtn.setBounds (960, 11, 58, 24);
+    locksBtn.setBounds (1022, 11, 62, 24);
+    undoBtn.setTooltip ("Undo the last change (Ctrl+Z)");
+    redoBtn.setTooltip ("Redo (Ctrl+Shift+Z)");
+    locksBtn.setTooltip ("Sections MUTATE leaves alone");
+    undoBtn.onClick = [&] { proc.undoEdit(); refreshPresetBox(); };
+    redoBtn.onClick = [&] { proc.redoEdit(); refreshPresetBox(); };
+    locksBtn.onClick = [&]
+    {
+        juce::PopupMenu m; // ticked = locked
+        m.addSectionHeader ("MUTATE leaves alone");
+        const auto names = NanoFrogProcessor::mutateGroupNames();
+        for (int g = 0; g < NanoFrogProcessor::MG_COUNT; ++g) m.addItem (g + 1, names[g], true, proc.isMutateLocked (g));
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&locksBtn),
+                         [this] (int id) { if (id > 0) proc.setMutateLocked (id - 1, ! proc.isMutateLocked (id - 1)); });
+    };
 
     page0.setBounds (0, 0, 1280, 900);
     page1.setBounds (0, 0, 1280, 900);
@@ -405,7 +425,8 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
         fx->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (278, 50, 120, 14);
         cap->setJustificationType (juce::Justification::centred);
     }
-    addChoice (fx, "delay_type", "", 278, 66, 120);
+    addChoice (fx, "delay_type", "", 250, 66, 86);
+    addChoice (fx, "delay_sync", "", 340, 66, 86)->setTooltip ("Tempo sync: a note value at the song / host tempo replaces TIME (Off = TIME knob)");
     addKnob (fx, "delay_time", "Time", 258, 100, 40);
     addKnob (fx, "delay_feedback", "Fdbk", 310, 100, 40);
     addKnob (fx, "delay_mix", "Mix", 362, 100, 40);
@@ -446,13 +467,15 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addSeg (l1, "lfo1_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
     addKnob (l1, "lfo1_rate", "Rate", 49, 72, 40);
     addKnob (l1, "lfo1_depth", "Depth", 129, 72, 40);
-    addChoice (l1, "lfo1_sync", "Sync", 59, 148, 116);
+    addChoice (l1, "lfo1_sync", "Sync", 8, 148, 104);
+    addChoice (l1, "lfo1_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
 
     auto* l2 = addSection ("LFO 2", 701, 514, 235, 210);
     addSeg (l2, "lfo2_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
     addKnob (l2, "lfo2_rate", "Rate", 49, 72, 40);
     addKnob (l2, "lfo2_depth", "Depth", 129, 72, 40);
-    addChoice (l2, "lfo2_sync", "Sync", 59, 148, 116);
+    addChoice (l2, "lfo2_sync", "Sync", 8, 148, 104);
+    addChoice (l2, "lfo2_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
 
     auto* mm = addSection ("MOD MATRIX", 942, 514, 330, 210);
     {
@@ -505,13 +528,36 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addKnob (ar, "arp_octaves", "Oct", 278, 58, 40);
     addKnob (ar, "arp_swing", "Swing", 336, 58, 40);
     addKnob (ar, "song_tempo", "Tempo", 394, 58, 40);
+    {
+        // STEPS: eight on/off toggles (an off step is a rest) + LAST STEP
+        auto* cap = new juce::Label ("STEPS", "STEPS");
+        cap->setColour (juce::Label::textColourId, NanoColors::dim);
+        ar->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (8, 134, 44, 18);
+        for (int k = 1; k <= 8; ++k)
+            addToggle (ar, "arp_step" + juce::String (k), juce::String (k), 54 + (k - 1) * 27, 134, 25, 18);
+        auto* lc = new juce::Label ("LAST", "LAST");
+        lc->setColour (juce::Label::textColourId, NanoColors::dim);
+        ar->addAndMakeVisible (lc); owned.emplace_back (lc); lc->setBounds (276, 134, 38, 18);
+        auto* last = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
+        last->setTextBoxStyle (juce::Slider::TextBoxRight, true, 26, 18);
+        last->setTooltip ("Last step: the pattern of on/off steps repeats after this many");
+        ar->addAndMakeVisible (last); owned.emplace_back (last);
+        last->setBounds (314, 134, 146, 18);
+        sAtt.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "arp_last_step", *last));
+        last->setRange (1.0, 8.0, 1.0);
+        last->setNumDecimalPlacesToDisplay (0);
+    }
 
     buildParent = &page0;
     auto* vo = addSection ("VOICE", 484, 730, 400, 160);
-    addKnob (vo, "voice_poly", "Poly", 37, 54, 44);
-    addKnob (vo, "voice_detune", "Detune", 127, 54, 44);
-    addKnob (vo, "voice_portamento", "Porta", 217, 54, 44);
-    addKnob (vo, "voice_vib", "Vib", 307, 54, 44);
+    addChoice (vo, "voice_assign", "Assign", 14, 30, 116)->setTooltip ("Poly; Mono: one voice with note priority; Unison: four stacked, detuned voices");
+    addChoice (vo, "voice_trigger", "Trigger", 142, 30, 116)->setTooltip ("Mono / Unison: Single = overlapping keys slide (legato), Multi = every key restarts the envelopes");
+    addChoice (vo, "voice_priority", "Priority", 270, 30, 116)->setTooltip ("Mono / Unison: which held key sounds");
+    addKnob (vo, "voice_poly", "Poly", 8, 80, 36);
+    addKnob (vo, "voice_detune", "Detune", 84, 80, 36);
+    addKnob (vo, "voice_unidet", "Uni Det", 160, 80, 36)->setTooltip ("Unison detune width in cents");
+    addKnob (vo, "voice_portamento", "Porta", 236, 80, 36);
+    addKnob (vo, "voice_vib", "Vib", 312, 80, 36);
 
     buildParent = &page1; buildTimbre = 1;
     {
@@ -607,13 +653,15 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addSeg (l1, "t2_lfo1_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
     addKnob (l1, "t2_lfo1_rate", "Rate", 49, 72, 40);
     addKnob (l1, "t2_lfo1_depth", "Depth", 129, 72, 40);
-    addChoice (l1, "t2_lfo1_sync", "Sync", 59, 148, 116);
+    addChoice (l1, "t2_lfo1_sync", "Sync", 8, 148, 104);
+    addChoice (l1, "t2_lfo1_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
 
     auto* l2 = addSection ("LFO 2", 701, 514, 235, 210);
     addSeg (l2, "t2_lfo2_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
     addKnob (l2, "t2_lfo2_rate", "Rate", 49, 72, 40);
     addKnob (l2, "t2_lfo2_depth", "Depth", 129, 72, 40);
-    addChoice (l2, "t2_lfo2_sync", "Sync", 59, 148, 116);
+    addChoice (l2, "t2_lfo2_sync", "Sync", 8, 148, 104);
+    addChoice (l2, "t2_lfo2_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
 
     auto* mm = addSection ("MOD MATRIX", 942, 514, 330, 210);
     {
@@ -642,17 +690,22 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
 
     // ---- Row 4 ----
     auto* vo = addSection ("VOICE", 484, 730, 400, 160);
-    addKnob (vo, "t2_voice_poly", "Poly", 37, 54, 44);
-    addKnob (vo, "t2_voice_detune", "Detune", 127, 54, 44);
-    addKnob (vo, "t2_voice_portamento", "Porta", 217, 54, 44);
-    addKnob (vo, "t2_voice_vib", "Vib", 307, 54, 44);
+    addChoice (vo, "t2_voice_assign", "Assign", 14, 30, 116)->setTooltip ("Poly; Mono: one voice with note priority; Unison: four stacked, detuned voices");
+    addChoice (vo, "t2_voice_trigger", "Trigger", 142, 30, 116)->setTooltip ("Mono / Unison: Single = overlapping keys slide (legato), Multi = every key restarts the envelopes");
+    addChoice (vo, "t2_voice_priority", "Priority", 270, 30, 116)->setTooltip ("Mono / Unison: which held key sounds");
+    addKnob (vo, "t2_voice_poly", "Poly", 8, 80, 36);
+    addKnob (vo, "t2_voice_detune", "Detune", 84, 80, 36);
+    addKnob (vo, "t2_voice_unidet", "Uni Det", 160, 80, 36)->setTooltip ("Unison detune width in cents");
+    addKnob (vo, "t2_voice_portamento", "Porta", 236, 80, 36);
+    addKnob (vo, "t2_voice_vib", "Vib", 312, 80, 36);
 
     }
 
     buildParent = this;
     auto* ou = addSection ("OUTPUT", 890, 730, 382, 160);
     addKnob (ou, "output_level", "Level", 8, 56, 52);
-    addKnob (ou, "master_tune", "MTune", 316, 64, 36, 56);
+    addKnob (ou, "master_tune", "MTune", 316, 34, 36, 56);
+    addKnob (ou, "bend_range", "Bend", 316, 94, 36, 56)->setTooltip ("Pitch bend range, semitones each way");
     auto* meterView = new MeterView (proc);
     meterViews.push_back (meterView);
     ou->addAndMakeVisible (meterView);
@@ -1186,6 +1239,8 @@ void FrogContent::resized()
 
 void FrogContent::timerCallback()
 {
+    undoBtn.setEnabled (proc.canUndo());
+    redoBtn.setEnabled (proc.canRedo());
     refreshValues();
     refreshStrips();
     syncModButtons (0);
@@ -1219,9 +1274,21 @@ NanoFrogEditor::NanoFrogEditor (NanoFrogProcessor& p)
     setResizeLimits (768, 540, 2048, 1440); // ~0.6x .. 1.6x of base
     addAndMakeVisible (content.get());
     addAndMakeVisible (corner);
+    setWantsKeyboardFocus (true);
 }
 
 NanoFrogEditor::~NanoFrogEditor() {}
+
+bool NanoFrogEditor::keyPressed (const juce::KeyPress& k)
+{
+    const auto m = k.getModifiers();
+    if (m.isCommandDown() && (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z'))
+    {
+        if (m.isShiftDown()) proc.redoEdit(); else proc.undoEdit();
+        return true;
+    }
+    return false;
+}
 
 void NanoFrogEditor::paint (juce::Graphics& g)
 {

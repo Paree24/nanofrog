@@ -1,3 +1,4 @@
+#include <cstring>
 #include "PresetBank.h"
 #include <cstdlib>
 #include <map>
@@ -159,7 +160,31 @@ const char* const kParamIds[kParamCount] = {
     "t2_osc2_digital",
     "t2_osc2_xmod",
     "tmix",
-    "limiter"
+    "limiter",
+    // added with voice assign / unison, LFO key sync, arp steps, bend range, delay sync
+    "lfo1_keysync",
+    "lfo2_keysync",
+    "voice_assign",
+    "voice_trigger",
+    "voice_priority",
+    "voice_unidet",
+    "t2_lfo1_keysync",
+    "t2_lfo2_keysync",
+    "t2_voice_assign",
+    "t2_voice_trigger",
+    "t2_voice_priority",
+    "t2_voice_unidet",
+    "arp_last_step",
+    "arp_step1",
+    "arp_step2",
+    "arp_step3",
+    "arp_step4",
+    "arp_step5",
+    "arp_step6",
+    "arp_step7",
+    "arp_step8",
+    "bend_range",
+    "delay_sync"
 };
 
 // ------------------------------------------------------------------ bank
@@ -581,6 +606,12 @@ void resetToDefaults (juce::AudioProcessorValueTreeState& apvts)
             ranged->setValueNotifyingHost (ranged->getDefaultValue());
 }
 
+static int indexOf (const char* id)
+{
+    for (int i = 0; i < kParamCount; ++i) if (std::strcmp (kParamIds[i], id) == 0) return i;
+    return -1;
+}
+
 void apply (juce::AudioProcessorValueTreeState& apvts, const std::vector<float>& values)
 {
     resetToDefaults (apvts);
@@ -588,6 +619,15 @@ void apply (juce::AudioProcessorValueTreeState& apvts, const std::vector<float>&
         if (! std::isfinite (values[(size_t) i])) continue; // missing: keep default
         else if (auto* p = apvts.getParameter (kParamIds[i]))
             p->setValueNotifyingHost (p->convertTo0to1 (values[(size_t) i]));
+    // files from before VOICE ASSIGN: a polyphony of 1 was the mono voice
+    for (auto pre : { "", "t2_" })
+    {
+        const int ia = indexOf ((juce::String (pre) + "voice_assign").toRawUTF8());
+        const int ip = indexOf ((juce::String (pre) + "voice_poly").toRawUTF8());
+        if (ia < 0 || ip < 0 || ia >= (int) values.size() || std::isfinite (values[(size_t) ia])) continue;
+        if (ip < (int) values.size() && std::isfinite (values[(size_t) ip]) && values[(size_t) ip] < 1.5f)
+            if (auto* p = apvts.getParameter (kParamIds[ia])) p->setValueNotifyingHost (p->convertTo0to1 (1.0f));
+    }
 }
 
 } // namespace PresetBank

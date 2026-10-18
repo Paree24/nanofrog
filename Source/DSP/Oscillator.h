@@ -6,11 +6,27 @@
 // Band-limited osc core: PolyBLEP saw/square, naive tri/sine,
 // 128 original digital single-cycle waves, white noise.
 // All original content; no sampled or copied wavetables.
+// User waves are stored as a mipmap: level k holds at most 1024 >> k
+// harmonics, in a table 4x that long (64 .. 2048 samples). The oscillator
+// reads the level whose top harmonic stays under Nyquist, so imported waves
+// don't alias as they go up the keyboard.
+namespace UserMip
+{
+    static constexpr int kLevels = 10;
+    constexpr int len (int k) { return (4 * (1024 >> k)) > 2048 ? 2048 : ((4 * (1024 >> k)) < 64 ? 64 : 4 * (1024 >> k)); }
+    constexpr int offset (int k) { return k <= 0 ? 0 : offset (k - 1) + len (k - 1); }
+    static constexpr int kTotal = offset (kLevels);
+}
+
 class OscCore
 {
 public:
     enum Wave { Saw = 0, Square = 1, Triangle = 2, Sine = 3, Digital = 4, Noise = 5, User = 6 };
     static constexpr int kUserLen = 2048;
+    static constexpr int kMipLevels = UserMip::kLevels;
+    static constexpr int mipLen (int k) { return UserMip::len (k); }
+    static constexpr int mipOffset (int k) { return UserMip::offset (k); }
+    static constexpr int kMipTotal = UserMip::kTotal;
 
     void setSampleRate (double sr) { sampleRate = sr; phase = 0.0; noiseGen.seed (12345u); }
     void setUserTable (const float* t) { userTable = t; }
@@ -47,6 +63,14 @@ public:
 
     // Square with explicit duty cycle 0..0.5 (hardware: C1 0 -> 50%, 127 -> 0%).
     float squarePw (double freq, double duty);
+
+    // Triangle with CONTROL 1 as wave folding (hardware: the triangle is
+    // reshaped, not retuned): 0 = plain triangle, max = folded three times.
+    float triFold (double freq, float amount);
+
+    // Sine with CONTROL 1 as cross-modulation depth: OSC2's last output
+    // phase-modulates the sine (0 = pure sine).
+    float sineXmod (double freq, float depth, float mod);
 
     // Saw morphing toward an octave-up saw (hardware SAW Control 1:
     // 0 = conventional saw, max = one octave higher).
@@ -242,7 +266,9 @@ private:
             s += bl * level[k] * std::sin (float (TAU * t * ratio[k] + ph[k]));
         }
         float pulse = (std::fmod (t + pwm * 0.5, 1.0) < 0.5 ? 1.0f : -1.0f);
-        float folded = std::tanh (s * (1.0f + xmod * 2.0f));
+        // XMOD drives a tanh fold; at 0 the wave plays as designed (it used
+        // to go through tanh regardless, which squashed every digital wave)
+        float folded = xmod > 0.001f ? std::tanh (s * (1.0f + xmod * 2.0f)) : s * 0.8f;
         float out = folded * (1.0f - shape * 0.45f) + pulse * (shape * 0.25f);
         advancePhase (inc);
         return out * 0.55f;
@@ -253,19 +279,26 @@ private:
         return uni (noiseGen) * 0.8f;
     }
 
-    // Imported single-cycle wave (2048 samples, zero-mean, peak-normalised by
-    // the importer). Null table falls back to sine so "User" is never silent.
+    // Imported single-cycle wave (mipmapped, see kMipLevels; zero-mean,
+    // peak-normalised by the importer). Null table falls back to sine so
+    // "User" is never silent.
     float renderUser (double inc, const float* table)
     {
         double t = phase;
         float out;
         if (table != nullptr)
         {
-            double pos = t * kUserLen;
-            int i0 = (int) pos % kUserLen;
-            int i1 = (i0 + 1) % kUserLen;
+            // first level whose top harmonic is under ~0.45 x the sample rate
+            const double maxH = 0.45 / (inc > 1.0e-9 ? inc : 1.0e-9);
+            int k = 0;
+            while (k < kMipLevels - 1 && (double) (1024 >> k) > maxH) ++k;
+            const float* lv = table + mipOffset (k);
+            const int len = mipLen (k);
+            double pos = t * len;
+            int i0 = (int) pos % len;
+            int i1 = (i0 + 1) % len;
             float fr = float (pos - std::floor (pos));
-            out = table[i0] * (1.0f - fr) + table[i1] * fr;
+            out = lv[i0] * (1.0f - fr) + lv[i1] * fr;
         }
         else
         {
@@ -281,6 +314,30 @@ inline float OscCore::squarePw (double freq, double duty)
     if (freq < 0.1) freq = 0.1;
     if (freq > sampleRate * 0.45) freq = sampleRate * 0.45;
     return squarePwDuty (freq / sampleRate, duty);
+}
+
+inline float OscCore::triFold (double freq, float amount)
+{
+    if (freq < 0.1) freq = 0.1;
+    if (freq > sampleRate * 0.45) freq = sampleRate * 0.45;
+    if (amount < 0.0f) amount = 0.0f; if (amount > 1.0f) amount = 1.0f;
+    const double t = phase;
+    float x = float (t < 0.5 ? 4.0 * t - 1.0 : 3.0 - 4.0 * t) * (1.0f + 3.0f * amount);
+    // triangle wave folder: reflect back into -1..1
+    x = std::fmod (x + 1.0f, 4.0f); if (x < 0.0f) x += 4.0f;
+    x = x < 2.0f ? x - 1.0f : 3.0f - x;
+    advancePhase (freq / sampleRate);
+    return x;
+}
+
+inline float OscCore::sineXmod (double freq, float depth, float mod)
+{
+    if (freq < 0.1) freq = 0.1;
+    if (freq > sampleRate * 0.45) freq = sampleRate * 0.45;
+    const double t = phase;
+    float s = std::sin (float (6.2831853 * t) + depth * 4.0f * mod);
+    advancePhase (freq / sampleRate);
+    return s * 0.9f;
 }
 
 inline float OscCore::sawMorph (double freq, float morph)

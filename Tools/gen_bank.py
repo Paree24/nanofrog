@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""NanoFrog factory bank generator — 400 original presets, deterministic.
+"""NanoFrog factory bank generator — 401 original presets, deterministic.
 
-Reads the live parameter order (kIds) and ranges from Source/PluginProcessor.cpp,
-so the table can never drift from the plugin. Writes Source/Presets.cpp.
+Reads the live parameter order (kParamIds in Source/PresetBank.cpp) and the
+ranges from Source/PluginProcessor.cpp, so the table can never drift from the
+plugin. Writes FactoryBank/NanoFrogFactory.json (applying the loudness trims
+in Tools/bank_levels.json and the re-roll salts in Tools/bank_salts.json).
 
 All names, recipes, and DSP are original work. Names are evocative of genre
 archetypes (trance, house, dubstep, DnB, ...) without copying any hardware,
 software, artist, or label names.
 
-Usage: python3 Tools/gen_bank.py   (run from NanoFrog/)
+Usage: python3 Tools/gen_bank.py   (run from NanoBerg/)
 """
 import random
 import re
@@ -87,7 +89,12 @@ for pre in ("", "t2_"):
 NCHOICE["modfx_type"] = 4
 NCHOICE["delay_type"] = 3
 NCHOICE["arp_mode"] = 6
-NCHOICE["arp_rate"] = 6
+NCHOICE["arp_rate"] = 7  # ... 1/32, then 1/6 appended
+for pre in ("", "t2_"):
+    NCHOICE[pre + "lfo1_keysync"] = 3  # Off / Timbre / Voice (built inline)
+    NCHOICE[pre + "lfo2_keysync"] = 3
+for k in range(1, 9):
+    RANGE[f"arp_step{k}"] = (0.0, 1.0, 1.0)  # built inline: on/off per step
 RANGE["tmix"] = (0.0, 1.0, 0.0)
 
 for k in KIDS:
@@ -117,11 +124,16 @@ def base_shared(rng):
         "t2_voice_portamento": 0.0, "t2_voice_vib": 0.0,
         "output_level": 1.0, "master_tune": 0.0, "song_tempo": 120.0, "tmix": 0.0,
         "limiter": 1,
+        "arp_last_step": 8, **{f"arp_step{k}": 1 for k in range(1, 9)},
+        "bend_range": 2.0, "delay_sync": 0,
+        "voice_trigger": 0, "voice_priority": 0, "voice_unidet": 15.0,
+        "t2_voice_trigger": 0, "t2_voice_priority": 0, "t2_voice_unidet": 15.0,
     }
 
 
 def base_timbre():
     return {
+        "lfo1_keysync": 2, "lfo2_keysync": 2,  # Voice: per-note restart (as before)
         "osc1_wave": W_SAW, "osc1_digital": 0, "osc1_octave": 0, "osc1_pitch": 0,
         "osc1_fine": 0.0, "osc1_level": 1.0, "osc1_shape": 0.0, "osc1_pwm": 0.5,
         "osc1_xmod": 0.0, "osc_mod": 0,
@@ -1671,6 +1683,10 @@ def finalize(name, recipe, full):
     if full.get("modfx_type") in (1, 2):
         full["modfx_depth"] = min(full.get("modfx_depth", 0.0), 0.35)
         full["modfx_rate"] = min(full.get("modfx_rate", 0.0), 0.35)
+    # VOICE ASSIGN: a single-voice recipe is the Mono voice (legato, last-note
+    # priority), everything else Poly
+    for pre in ("", "t2_"):
+        full[pre + "voice_assign"] = 1 if int(round(full[pre + "voice_poly"])) == 1 else 0
     probe = {k: full[k] for k in base_timbre()}
     tags = tags_for(recipe, probe, full)
     vals, vmap = [], {}

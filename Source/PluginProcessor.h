@@ -3,6 +3,8 @@
 #include <juce_dsp/juce_dsp.h>
 #include "DSP/Voice.h"
 #include "DSP/Effects.h"
+#include "DSP/Limiter.h"
+#include "SnapshotUndo.h"
 
 #include "PresetBank.h"
 
@@ -45,6 +47,24 @@ public:
     // Bass/keys/leads/percussive voices keep their envelopes (category
     // comes from the current preset's tags).
     void mutateCurrentPatch();
+    // MUTATE locks: a locked section is never touched (both timbres)
+    enum MutateGroup { MG_OSC, MG_MIXER, MG_FILTER, MG_AMP_EG, MG_LFO, MG_PATCH, MG_FX, MG_ARP, MG_COUNT };
+    static juce::StringArray mutateGroupNames() { return { "Oscillators", "Mixer", "Filter", "Amp + EGs", "LFOs", "Virtual Patch", "Effects", "Arpeggiator" }; }
+    static int mutateGroup (const juce::String& baseId); // -1 = not a mutate target
+    bool isMutateLocked (int g) const { return ((int) apvts.state.getProperty ("mutateLocks", 0) >> g) & 1; }
+    void setMutateLocked (int g, bool locked);
+
+    // ---- undo / redo (message thread): knob gestures are one step each;
+    // preset loads, INIT and MUTATE are one step ----
+    std::unique_ptr<SnapshotUndo::Transaction> undoStep()
+    {
+        return undo != nullptr ? std::make_unique<SnapshotUndo::Transaction> (*undo) : nullptr;
+    }
+    bool canUndo() const { return undo != nullptr && undo->canUndo(); }
+    bool canRedo() const { return undo != nullptr && undo->canRedo(); }
+    void undoEdit() { if (undo != nullptr) undo->undo(); }
+    int activeVoiceCount (int timbre) const { int n = 0; for (auto& v : voices[timbre & 1]) if (v.isActive()) ++n; return n; } // tests / UI
+    void redoEdit() { if (undo != nullptr) undo->redo(); }
     // Immediate factory load for the browser (message thread only; hosts must
     // use setCurrentProgram, which defers to the message thread).
     void loadFactoryPreset (int index)
@@ -102,7 +122,24 @@ private:
     float egTimeFromKnob (float v01, float maxSec);
 
     static constexpr int MaxVoices = 8;
+    static constexpr int kUnison = 4; // Unison stacks voices 0..3
     NanoVoice voices[2][MaxVoices];
+    // Mono / Unison voice assign (per timbre)
+    int blockAssign[2] = { 0, 0 }, blockTrigger[2] = { 0, 0 }, blockPriority[2] = { 0, 0 };
+    float blockUniDet[2] = { 15.0f, 15.0f };
+    bool blockT2Off = false; // Timbre Mix at 0: Timbre 2 is not rendered
+    int monoPick (int timbre) const;                    // held key the mono voice should play
+    void monoNoteOn (int timbre, int note, float vel, bool fromArp);
+    void monoRelease (int timbre, int note);            // a key went up (after the pedal)
+    void startPolyVoice (int timbre, int note, float vel);
+    void releaseKey (int note);                         // key / pedal release for all timbres
+    // master chain extras: DC cleanup, idle gate, lookahead limiter
+    PeakLimiter limiter;
+    float dcX[2] = {}, dcY[2] = {};
+    float gateG = 1.0f; int idleSamples = 0;
+    std::unique_ptr<SnapshotUndo> undo;
+    void buildUserMips (const float* src2048, float* dst); // message thread (FFT)
+    float bankMip[2][kBankMax][OscCore::kMipTotal] = {};
     float tmixSm[2] = { 1.0f, 0.0f }; // equal-power T1/T2 crossfade gains
     // arp state
     struct ArpState {
@@ -111,6 +148,8 @@ private:
         std::vector<int> held;      // latched notes (latch on)
         std::vector<int> sorted, pattern; // scratch, reserved up front
         int currentNote = -1;
+        int stepPos = 0;   // position in the LAST STEP cycle (0..7)
+        long tick = 0;     // every step, played or rest (swing parity)
     } arp;
     std::vector<int> heldNotes; // raw held (before arp)
     // Per-block snapshot used by MIDI handling and rendering (no per-event

@@ -70,6 +70,9 @@ jobs:
       - name: Self-test (Linux, under Xvfb)
         if: runner.os == 'Linux'
         run: xvfb-run -a ./build/NanoFrogHeadlessTest_artefacts/Release/NanoFrogHeadlessTest
+      - name: Host check (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ./build/HostCheck build/NanoFrog_artefacts/Release/VST3/NanoFrog.vst3
 
       - name: Self-test (macOS)
         if: runner.os == 'macOS'

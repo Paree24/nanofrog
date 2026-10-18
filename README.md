@@ -9,15 +9,23 @@ early-2000s VA classics: two independent timbres, each with 2 oscillators
 (saw/square/triangle/sine + 128 procedural digital waves + user-imported
 single-cycle waves) plus noise through a mixer with osc2→osc1 FM, a resonant
 multi-mode filter (LP24/LP12/BP12/HP12), amp with drive, 2 ADSR envelopes,
-2 tempo-syncable LFOs, and a 4-slot mod matrix, feeding a shared chain of
-modulation FX (chorus/flanger/phaser), tempo-syncable delay, 2-band EQ, and
-an output limiter, with a tempo-synced arpeggiator on top. A single header
+2 tempo-syncable LFOs (key sync Off / Timbre / Voice), a 4-slot mod matrix
+(EG, velocity and mod-wheel sources unipolar, PITCH moves both oscillators),
+and Poly / Mono / Unison voice assign (Single or Multi trigger, Last / Low /
+High note priority, 4-voice unison with detune in cents), feeding a shared
+chain of modulation FX (chorus/flanger/phaser), a tempo-syncable Stereo /
+Cross / Ping-pong delay, 2-band EQ, DC cleanup, an idle gate and a -0.3 dBFS
+lookahead limiter, with a tempo-synced arpeggiator on top (Up / Down / Alt1 /
+Alt2 / Random / Trigger, 1/4 ... 1/32 plus 1/6, last step 1-8 with steps
+switchable on and off). Hard sync is band-limited, user waves are
+mipmapped, TRIANGLE Control 1 folds the wave and SINE Control 1 sets the
+cross-mod depth from OSC2. Pitch-bend range is adjustable. A single header
 knob crossfades Timbre 1 ↔ Timbre 2.
 
 It ships 401 original factory presets as editable JSON data (never compiled
 in) with category/character tags, a preset browser with search + tag
-filters, and user preset save/overwrite/delete, plus a header MUTATE button that slightly
-re-rolls the current sound (oscillators included but never pitch; envelopes
+filters, user preset save/overwrite/delete, undo / redo (Ctrl+Z), plus a header
+MUTATE button (with section LOCKS) that slightly re-rolls the current sound (oscillators included but never pitch; envelopes
 frozen for bass/keys/leads/percussive voices; bypassed modules never wake up).
 
 All DSP, wavetables, UI, and presets are original work. This project is not
@@ -73,11 +81,12 @@ per-slot seeds plus `Tools/bank_salts.json`). Every preset is built from its
 recipe plus category-aware variation and must differ from all earlier ones.
 `python3 Tools/audio_diversity.py` (needs the built headless test) renders
 the bank, re-rolls presets that *sound* like an earlier one, and updates the
-salts — the shipped bank has ~1% audible near-twins (was ~70%).
+salts — the shipped bank is under the 8% clone target (7.2% after the voice /
+modulation changes; was ~70% before the loop existed).
 
 Every factory preset is guaranteed in key: no oscillator sits more than 25
 cents from the played note (or its fourth/fifth/octave), counting fine tune,
-Detune spread, unison, triangle Shape retune, ring/FM ratios and vibrato
+Detune spread, unison, ring/FM ratios and vibrato
 (`pitch_safe` in the generator; checked by the headless test).
 `python3 Tools/level_bank.py` measures every preset and writes
 `Tools/bank_levels.json` (output-level trims: even levels, ~2.5 dB under the

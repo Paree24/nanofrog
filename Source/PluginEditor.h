@@ -54,6 +54,7 @@ private:
     juce::ComboBox presetBox;
     juce::TextButton browseBtn { "BROWSE" };
     juce::TextButton mutateBtn { "MUTATE" };
+    juce::TextButton undoBtn { "UNDO" }, redoBtn { "REDO" }, locksBtn { "LOCKS" };
     std::unique_ptr<PresetBrowser> browser;
     juce::TextButton tabT1 { "TIMBRE 1" }, tabT2 { "TIMBRE 2" };
     int curPage = 0;
@@ -132,6 +133,8 @@ public:
     FrogContent& getContent() { return *content; }
 
 private:
+    bool keyPressed (const juce::KeyPress&) override; // Ctrl/Cmd+Z undo, +Shift redo
+    juce::TooltipWindow tooltips { this, 700 };      // makes every setTooltip() show
     NanoFrogProcessor& proc;
     std::unique_ptr<FrogContent> content;
     juce::ResizableCornerComponent corner;

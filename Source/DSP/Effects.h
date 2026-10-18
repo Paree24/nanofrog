@@ -35,7 +35,18 @@ public:
     // type 0 off 1 chorus 2 flanger 3 phaser; rate 0..1, depth 0..1, mix 0..1
     void process (float* L, float* R, int n, int type, float rate01, float depth01, float mix01)
     {
-        if (type == 0 || mix01 <= 0.001f) return;
+        if (type == 0 || mix01 <= 0.001f)
+        {
+            // Off or muted: the delay line keeps recording (as it does under
+            // the Phaser), so switching back to Chorus / Flanger never replays
+            // audio from whenever it was last used
+            for (int i = 0; i < n; ++i)
+            {
+                bufL[pos] = L[i]; bufR[pos] = R[i];
+                pos = (pos + 1) % bufL.size();
+            }
+            return;
+        }
         // Slow sweep (0.05..2.55 Hz); right channel runs ~11% faster.
         double rateHz = 0.05 + (double) rate01 * (double) rate01 * 2.5;
         double rateR = rateHz * 1.11;
@@ -78,6 +89,7 @@ public:
                 float width = 0.08f + depth01 * 0.35f;
                 float fbAmt = depth01 * 0.55f;
                 float cL = center + sL * width, cR = center + sR * width;
+                bufL[pos] = L[i]; bufR[pos] = R[i]; // keep the chorus / flanger line current
                 float yL = L[i] + fbL * fbAmt, yR = R[i] + fbR * fbAmt;
                 for (int s = 0; s < 4; ++s)
                 {
@@ -128,12 +140,13 @@ public:
     }
     void reset() { std::fill (bufL.begin(), bufL.end(), 0.0f); std::fill (bufR.begin(), bufR.end(), 0.0f); }
 
-    // time01 0..1 -> 20..900ms, fb 0..0.85, mix 0..1
-    void process (float* L, float* R, int n, int type, float time01, float fb, float mix)
+    // time01 0..1 -> 20..900ms (or syncMs > 0: a tempo-synced time, up to 2.4 s),
+    // fb 0..0.85, mix 0..1
+    void process (float* L, float* R, int n, int type, float time01, float fb, float mix, float syncMs = -1.0f)
     {
         // Always runs (mix 0 just outputs dry) so the line never holds stale
         // echoes that would replay when the mix comes back up.
-        float ms = 20.0f + time01 * time01 * 880.0f;
+        float ms = syncMs > 0.0f ? std::min (syncMs, 2400.0f) : 20.0f + time01 * time01 * 880.0f;
         double ds = ms * 0.001 * fs;
         if (dsSm < 0.0) dsSm = ds;
         // glide the read tap (tape-style) instead of jumping: no zipper clicks
@@ -143,12 +156,24 @@ public:
         {
             dsSm += (ds - dsSm) * tk;
             float dL = readAt (bufL, pos, dsSm);
-            float dR = readAt (bufR, pos, dsSm);
             float inL = L[i], inR = R[i];
             float wL, wR, nL, nR;
-            if (type == 0)      { wL = dL; wR = dR; nL = inL + dL * f; nR = inR + dR * f; }
-            else if (type == 1) { wL = dR; wR = dL; nL = inL + dR * f; nR = inR + dL * f; }
-            else                { wL = dR; wR = dL; nL = inR + dR * f; nR = inL + dL * f; }
+            if (type == 0)      // Stereo: each side echoes itself
+            {
+                float dR = readAt (bufR, pos, dsSm);
+                wL = dL; wR = dR; nL = inL + dL * f; nR = inR + dR * f;
+            }
+            else if (type == 1) // Cross: the right line runs 3/4 of the time and
+            {                   // the feedback crosses over, so even a centred
+                                // source fans out into an off-beat, widening trail
+                float dR = readAt (bufR, pos, dsSm * 0.75);
+                wL = dL; wR = dR; nL = inL + dR * f; nR = inR + dL * f;
+            }
+            else                // Ping-pong: the input enters the left line only and
+            {                   // each echo jumps sides (L, R, L ...), hard-panned
+                float dR = readAt (bufR, pos, dsSm);
+                wL = dL; wR = dR; nL = 0.5f * (inL + inR) + dR * f; nR = dL * f;
+            }
             bufL[pos] = nL; bufR[pos] = nR;
             L[i] = inL * (1.0f - mix * 0.5f) + wL * mix * 0.5f;
             R[i] = inR * (1.0f - mix * 0.5f) + wR * mix * 0.5f;
