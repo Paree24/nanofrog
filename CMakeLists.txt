@@ -39,6 +39,7 @@ juce_add_plugin(NanoFrog
 target_sources(NanoFrog PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/PastelViews.cpp
     Source/PresetBank.cpp
     Source/PresetBrowser.cpp
 )
@@ -88,6 +89,7 @@ target_sources(NanoFrogHeadlessTest PRIVATE
     HeadlessTest.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/PastelViews.cpp
     Source/PresetBank.cpp
     Source/PresetBrowser.cpp
 )

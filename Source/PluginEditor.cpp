@@ -56,6 +56,14 @@ static juce::String fmtVal (const juce::String& pidIn, float v)
     return pct (v);
 }
 
+// the filter view draws in Hz: NanoFrog's cutoff is 0..1 -> 40 Hz .. 18 kHz
+static pastel::FilterView* nanoCutoff (pastel::FilterView* fv)
+{
+    fv->setHzMapping ([] (float v) { return 40.0f * std::pow (450.0f, v); },
+                      [] (float hz) { return std::log (hz / 40.0f) / std::log (450.0f); });
+    return fv;
+}
+
 // ---------- segmented radio strip ----------
 SegStrip::SegStrip (NanoFrogProcessor& p, const juce::String& id,
                     const juce::StringArray& labels, bool redActive, int cols)
@@ -205,12 +213,13 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     : proc (p)
 {
     setLookAndFeel (&look);
+    pastel::Theme::format = fmtVal;   // the views' readouts read like the knobs
     formatManager.registerBasicFormats();
 
     addAndMakeVisible (presetLabel);
     presetLabel.setText ("NANOFROG", juce::dontSendNotification);
     presetLabel.setJustificationType (juce::Justification::centredLeft);
-    presetLabel.setColour (juce::Label::textColourId, NanoColors::accent);
+    presetLabel.setColour (juce::Label::textColourId, NanoColors::text);
 
     addAndMakeVisible (prevBtn);
     prevBtn.onClick = [&]
@@ -258,7 +267,7 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     for (int i = 0; i < 2; ++i)
     {
         addAndMakeVisible (tabs[i]);
-        tabs[i]->setBounds (680 + i * 106, 11, 102, 24);
+        tabs[i]->setBounds (16 + i * 176, 54, 170, 28);   // folder tabs over the timbre panel
         tabs[i]->setClickingTogglesState (true);
         tabs[i]->setRadioGroupId (0x7418, juce::dontSendNotification);
         tabs[i]->onClick = [this, i] { selectPage (i); };
@@ -318,399 +327,274 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addAndMakeVisible (mixSlider); owned.emplace_back (mixSlider);
     sAtt.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         proc.apvts, "tmix", *mixSlider));
-    buildParent = &page0; buildTimbre = 0;
-
-    // ---- Row 1 ----
-    auto* osc1 = addSection ("OSC 1", 8, 56, 340, 256);
-    addChoice (osc1, "osc1_wave", "Wave", 8, 28, 120);
-    addChoice (osc1, "osc1_digital", "Digital", 8, 68, 120);
-    addAndMakeVisible (importBtn);
-    importBtn.onClick = [&] { importWaveFile (0, 0); };
-    osc1->addAndMakeVisible (importBtn);
-    importBtn.setBounds (8, 112, 120, 22);
-    folderBtn.onClick = [&] { importWaveFolder (0, 0); };
-    osc1->addAndMakeVisible (folderBtn);
-    folderBtn.setBounds (8, 140, 120, 22);
-    waveNameLabel.setText (proc.hasUserWave() ? proc.getUserWaveName() : "No user wave",
-                           juce::dontSendNotification);
-    waveNameLabel.setColour (juce::Label::textColourId, NanoColors::dim);
-    osc1->addAndMakeVisible (waveNameLabel);
-    waveNameLabel.setBounds (8, 164, 120, 22);
-    waveNameLabel.setJustificationType (juce::Justification::centred);
-    setOwnFont (waveNameLabel, look.uiFont (11.0f));
-    addKnob (osc1, "osc1_octave", "Octave", 136, 64, 36, 50);
-    addKnob (osc1, "osc1_pitch", "Pitch", 186, 64, 36, 50);
-    addKnob (osc1, "osc1_fine", "Fine", 236, 64, 36, 50);
-    addKnob (osc1, "osc1_level", "Level", 286, 64, 36, 50);
-    addKnob (osc1, "osc1_shape", "Shape", 136, 148, 36, 50);
-    addKnob (osc1, "osc1_pwm", "PWM", 186, 148, 36, 50);
-    addKnob (osc1, "osc1_xmod", "X-Mod", 236, 148, 36, 50);
-    addModButton (osc1, "SYNC", true, 0, 8, 190, 120, 24);
-    addModButton (osc1, "RING", false, 0, 8, 220, 120, 24);
-
-    auto* osc2 = addSection ("OSC 2", 354, 56, 340, 256);
-    addChoice (osc2, "osc2_wave", "Wave", 8, 28, 120);
-    addChoice (osc2, "osc2_digital", "Digital", 8, 68, 120);
-    impBtnO2[0].setButtonText ("IMPORT WAV");
-    osc2->addAndMakeVisible (impBtnO2[0]);
-    impBtnO2[0].setBounds (8, 112, 120, 22);
-    impBtnO2[0].onClick = [&] { importWaveFile (0, 1); };
-    fldBtnO2[0].setButtonText ("FOLDER");
-    osc2->addAndMakeVisible (fldBtnO2[0]);
-    fldBtnO2[0].setBounds (8, 140, 120, 22);
-    fldBtnO2[0].onClick = [&] { importWaveFolder (0, 1); };
-    initWaveLabel (osc2, waveNameO2[0]);
-    addModButton (osc2, "SYNC", true, 1, 8, 190, 120, 24);
-    addModButton (osc2, "RING", false, 1, 8, 220, 120, 24);
-    addKnob (osc2, "osc2_octave", "Octave", 136, 64, 36, 50);
-    addKnob (osc2, "osc2_pitch", "Pitch", 186, 64, 36, 50);
-    addKnob (osc2, "osc2_fine", "Fine", 236, 64, 36, 50);
-    addKnob (osc2, "osc2_level", "Level", 286, 64, 36, 50);
-    addKnob (osc2, "osc2_shape", "Shape", 136, 148, 36, 50);
-    addKnob (osc2, "osc2_pwm", "PWM", 186, 148, 36, 50);
-    addKnob (osc2, "osc2_xmod", "X-Mod", 236, 148, 36, 50);
-    auto* mixer = addSection ("MIXER", 700, 56, 190, 256);
-    addKnob (mixer, "mix_o1", "Osc 1", 24, 54, 52);
-    addKnob (mixer, "mix_o2", "Osc 2", 114, 54, 52);
-    addKnob (mixer, "mix_noise", "Noise", 24, 146, 52);
-    addKnob (mixer, "fm_amt", "FM", 114, 146, 52);
-
-    buildParent = this;
-    auto* scope = addSection ("SCOPE", 896, 56, 376, 256);
-    auto* scopeView = new ScopeView();
-    scopeViews.push_back (scopeView);
-    scope->addAndMakeVisible (scopeView);
-    owned.emplace_back (scopeView);
-    scopeView->setBounds (8, 32, 360, 216);
-    buildParent = &page0;
-
-    // ---- Row 2 ----
-    auto* filt = addSection ("FILTER", 8, 318, 350, 190);
+    // ================= the two timbre pages: one layout, t2_ ids on page 1 =================
+    // (v3, after mockup/redesign_v3.png: oscillators / mixer / filter / amp on top,
+    //  envelopes / LFOs / matrix / voice under them, the shared row at the bottom)
+    using pastel::Wave;
+    auto makeTimbrePage = [this] (int t)
     {
-        auto* cap = new juce::Label ("TYPE", "TYPE");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        filt->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (8, 62, 150, 14);
-        cap->setJustificationType (juce::Justification::centred);
-    }
-    auto* fstrip = addSeg (filt, "filter_type",
-                           { "LP24", "LP12", "BP12", "HP12" }, true, 8, 80, 72, 26, 2);
-    juce::ignoreUnused (fstrip);
-    addKnob (filt, "filter_cutoff", "Cutoff", 184, 30, 46);
-    addKnob (filt, "filter_reso", "Reso", 260, 30, 46);
-    addKnob (filt, "filter_keytrack", "KeyTrk", 184, 106, 46);
-    addKnob (filt, "filter_envamt", "EnvAmt", 260, 106, 46);
-
-    auto* amp = addSection ("AMP", 364, 318, 230, 190);
-    addKnob (amp, "amp_level", "Level", 6, 54, 44);
-    addKnob (amp, "amp_pan", "Pan", 60, 54, 44);
-    addKnob (amp, "amp_velocity", "Veloc", 114, 54, 44);
-    addKnob (amp, "amp_drive", "Drive", 168, 54, 44);
-    addToggle (amp, "amp_dist", "DIST", 170, 136, 52, 24);
-
-    buildParent = this;
-    auto* fx = addSection ("EFFECTS", 600, 318, 672, 190);
-    {
-        auto* cap = new juce::Label ("MOD FX", "MOD FX");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        fx->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (55, 50, 120, 14);
-        cap->setJustificationType (juce::Justification::centred);
-    }
-    addChoice (fx, "modfx_type", "", 55, 66, 120);
-    addKnob (fx, "modfx_rate", "Rate", 35, 100, 40);
-    addKnob (fx, "modfx_depth", "Depth", 87, 100, 40);
-    addKnob (fx, "modfx_mix", "Mix", 139, 100, 40);
-    {
-        auto* cap = new juce::Label ("DELAY", "DELAY");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        fx->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (278, 50, 120, 14);
-        cap->setJustificationType (juce::Justification::centred);
-    }
-    addChoice (fx, "delay_type", "", 250, 66, 86);
-    addChoice (fx, "delay_sync", "", 340, 66, 86)->setTooltip ("Tempo sync: a note value at the song / host tempo replaces TIME (Off = TIME knob)");
-    addKnob (fx, "delay_time", "Time", 258, 100, 40);
-    addKnob (fx, "delay_feedback", "Fdbk", 310, 100, 40);
-    addKnob (fx, "delay_mix", "Mix", 362, 100, 40);
-    {
-        auto* cap = new juce::Label ("EQ", "EQ");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        fx->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (508, 50, 100, 14);
-        cap->setJustificationType (juce::Justification::centred);
-    }
-    addKnob (fx, "eq_low", "Low", 504, 100, 40);
-    addKnob (fx, "eq_high", "High", 556, 100, 40);
-    {
-        // thin vertical dividers between MOD / DELAY / EQ (Labels paint their bg)
-        for (int dx : { 223, 453 })
+        buildParent = t == 0 ? &page0 : &page1;
+        buildTimbre = t;
+        const juce::String pre = t == 0 ? "" : "t2_";
+        auto caption = [this] (juce::Component* parent, const juce::String& text, juce::Rectangle<int> b)
         {
-            auto* div = new juce::Label();
-            div->setColour (juce::Label::backgroundColourId, NanoColors::border);
-            fx->addAndMakeVisible (div); owned.emplace_back (div);
-            div->setBounds (dx, 34, 1, 144);
-        }
-    }
-
-    buildParent = &page0;
-    // ---- Row 3 ----
-    auto* e1 = addSection ("ENV 1 (FILTER)", 8, 514, 220, 210);
-    addKnob (e1, "env1_a", "A", 44, 44, 40);
-    addKnob (e1, "env1_d", "D", 120, 44, 40);
-    addKnob (e1, "env1_s", "S", 44, 122, 40);
-    addKnob (e1, "env1_r", "R", 120, 122, 40);
-
-    auto* e2 = addSection ("ENV 2 (AMP)", 234, 514, 220, 210);
-    addKnob (e2, "env2_a", "A", 44, 44, 40);
-    addKnob (e2, "env2_d", "D", 120, 44, 40);
-    addKnob (e2, "env2_s", "S", 44, 122, 40);
-    addKnob (e2, "env2_r", "R", 120, 122, 40);
-
-    auto* l1 = addSection ("LFO 1", 460, 514, 235, 210);
-    addSeg (l1, "lfo1_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
-    addKnob (l1, "lfo1_rate", "Rate", 49, 72, 40);
-    addKnob (l1, "lfo1_depth", "Depth", 129, 72, 40);
-    addChoice (l1, "lfo1_sync", "Sync", 8, 148, 104);
-    addChoice (l1, "lfo1_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
-
-    auto* l2 = addSection ("LFO 2", 701, 514, 235, 210);
-    addSeg (l2, "lfo2_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
-    addKnob (l2, "lfo2_rate", "Rate", 49, 72, 40);
-    addKnob (l2, "lfo2_depth", "Depth", 129, 72, 40);
-    addChoice (l2, "lfo2_sync", "Sync", 8, 148, 104);
-    addChoice (l2, "lfo2_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
-
-    auto* mm = addSection ("MOD MATRIX", 942, 514, 330, 210);
-    {
-        const char* heads[3] = { "SOURCE", "DESTINATION", "AMOUNT" };
-        int hxs[3] = { 8, 122, 256 };
-        int hws[3] = { 108, 130, 66 };
-        for (int i = 0; i < 3; ++i)
-        {
-            auto* cap = new juce::Label (heads[i], heads[i]);
+            auto* cap = new juce::Label (text, text);
             cap->setColour (juce::Label::textColourId, NanoColors::dim);
-            mm->addAndMakeVisible (cap); owned.emplace_back (cap);
-            cap->setBounds (hxs[i], 30, hws[i], 14);
+            setOwnFont (*cap, look.titleFont (10.0f));
             cap->setJustificationType (juce::Justification::centred);
-        }
-    }
-    const char* ss[4] = { "mod1_src", "mod2_src", "mod3_src", "mod4_src" };
-    const char* dd[4] = { "mod1_dst", "mod2_dst", "mod3_dst", "mod4_dst" };
-    const char* aa[4] = { "mod1_amt", "mod2_amt", "mod3_amt", "mod4_amt" };
-    for (int i = 0; i < 4; ++i)
-    {
-        int y = 52 + i * 42;
-        addChoice (mm, ss[i], "", 8, y, 108);
-        addChoice (mm, dd[i], "", 122, y, 130);
-        addKnob (mm, aa[i], "", 261, y - 4, 30); // knob centred under AMOUNT
-    }
+            parent->addAndMakeVisible (cap); owned.emplace_back (cap);
+            cap->setBounds (b);
+        };
 
-    // ---- Row 4 ----
-    buildParent = this;
-    auto* ar = addSection ("ARPEGGIATOR", 8, 730, 470, 160);
-    addToggle (ar, "arp_on", "ON", 8, 54, 64, 22);
-    static_cast<juce::ToggleButton*> (owned.back().get())->getProperties().set ("togRed", true);
-    addToggle (ar, "arp_latch", "LATCH", 8, 80, 64, 22);
-    auto* arpOff = new juce::TextButton ("OFF");
-    arpOffBtn = arpOff;
-    ar->addAndMakeVisible (arpOff); owned.emplace_back (arpOff);
-    arpOff->setBounds (8, 106, 64, 22);
-    arpOff->onClick = [&]
-    {
-        for (auto* pid : { "arp_on", "arp_latch" })
-            if (auto* p = proc.apvts.getParameter (pid))
+        // ---- row 1: OSC 1, OSC 2, MIXER, FILTER, AMP ----
+        for (int o = 1; o <= 2; ++o)
+        {
+            const juce::String id = pre + "osc" + juce::String (o) + "_";
+            auto* s = addSection ("OSC " + juce::String (o), o == 1 ? 26 : 334, 92, 300, 226);
+            addView<pastel::WaveView> (s, { 12, 34, 276, 56 }, proc.apvts, id + "wave", id + "shape",
+                                       std::vector<Wave> { Wave::saw, Wave::pulse, Wave::tri, Wave::sine, Wave::digital, Wave::noise, Wave::digital })
+                ->setTooltip ("Drag sideways on the square wave to set its width (Shape)");
+            addView<pastel::SegChoice> (s, { 12, 96, 276, 22 }, proc.apvts, id + "wave",
+                                        juce::StringArray { "", "", "", "", "DIG", "NOISE", "USER" },
+                                        std::vector<Wave> { Wave::saw, Wave::square, Wave::tri, Wave::sine, Wave::none, Wave::none, Wave::none });
+            addChoice (s, id + "digital", "", 12, 124, 112)->setTooltip ("Digital wave (with DIG selected)");
+            juce::TextButton& ib = o == 1 ? (t == 0 ? importBtn : importBtn2) : impBtnO2[t];
+            juce::TextButton& fb = o == 1 ? (t == 0 ? folderBtn : folderBtn2) : fldBtnO2[t];
+            ib.setButtonText ("IMPORT");
+            fb.setButtonText ("FOLDER");
+            ib.setTooltip ("Import a single-cycle WAV as the USER wave");
+            fb.setTooltip ("Import a folder of single-cycle WAVs");
+            ib.onClick = [this, t, o] { importWaveFile (t, o - 1); };
+            fb.onClick = [this, t, o] { importWaveFolder (t, o - 1); };
+            s->addAndMakeVisible (ib); ib.setBounds (130, 124, 76, 22);
+            s->addAndMakeVisible (fb); fb.setBounds (212, 124, 76, 22);
+            if (o == 1)
             {
-                p->beginChangeGesture();
-                p->setValueNotifyingHost (0.0f);
-                p->endChangeGesture();
+                juce::Label& wl = t == 0 ? waveNameLabel : waveNameLabel2;
+                wl.setText (proc.hasUserWave() ? proc.getUserWaveName() : "No user wave", juce::dontSendNotification);
+                wl.setColour (juce::Label::textColourId, NanoColors::dim);
+                s->addAndMakeVisible (wl);
+                wl.setJustificationType (juce::Justification::centredLeft);
+                setOwnFont (wl, look.uiFont (10.5f));
+                wl.setBounds (12, 148, 276, 14);
             }
+            else
+            {
+                initWaveLabel (s, waveNameO2[t]);
+                waveNameO2[t].setJustificationType (juce::Justification::centredLeft);
+                waveNameO2[t].setBounds (12, 148, 276, 14);
+                // the oscillator-2 modes (sync / ring) as one segmented switch
+                addView<pastel::SegChoice> (s, { 120, 6, 168, 20 }, proc.apvts, pre + "osc_mod",
+                                            juce::StringArray { "OFF", "RING", "SYNC", "R+S" })
+                    ->setTooltip ("Oscillator 2: hard sync to oscillator 1, ring modulation, or both");
+            }
+            const char* ks[7] = { "octave", "pitch", "fine", "level", "shape", "pwm", "xmod" };
+            const char* kl[7] = { "Oct", "Pitch", "Fine", "Level", "Shape", "PWM", "X-Mod" };
+            for (int k = 0; k < 7; ++k)
+                addKnob (s, id + ks[k], kl[k], -4 + k * 41, 164, 26, 40);
+        }
+        auto* mixer = addSection ("MIXER", 642, 92, 150, 226);
+        addKnob (mixer, pre + "mix_o1", "Osc 1", 12, 36, 44);
+        addKnob (mixer, pre + "mix_o2", "Osc 2", 82, 36, 44);
+        addKnob (mixer, pre + "mix_noise", "Noise", 12, 132, 44);
+        addKnob (mixer, pre + "fm_amt", "FM 2>1", 82, 132, 44);
+
+        auto* filt = addSection ("FILTER", 800, 92, 250, 226);
+        nanoCutoff (addView<pastel::FilterView> (filt, { 12, 34, 226, 84 }, proc.apvts, pre + "filter_cutoff", pre + "filter_reso",
+                                                 pre + "filter_type", juce::String(), juce::String(),
+                                                 std::vector<pastel::FilterView::Mode> { pastel::FilterView::Mode::lp24, pastel::FilterView::Mode::lp12,
+                                                                                         pastel::FilterView::Mode::bp12, pastel::FilterView::Mode::hp12 }))
+            ->setTooltip ("Drag: cutoff sideways, resonance up / down");
+        addSeg (filt, pre + "filter_type", { "LP24", "LP12", "BP12", "HP12" }, true, 12, 124, 54, 22, 4);
+        addKnob (filt, pre + "filter_cutoff", "Cutoff", 2, 154, 30, 52);
+        addKnob (filt, pre + "filter_reso", "Reso", 62, 154, 30, 52);
+        addKnob (filt, pre + "filter_keytrack", "KeyTrk", 122, 154, 30, 52);
+        addKnob (filt, pre + "filter_envamt", "EnvAmt", 182, 154, 30, 52);
+
+        auto* amp = addSection ("AMP", 1058, 92, 196, 226);
+        addKnob (amp, pre + "amp_level", "Level", 8, 34, 56);
+        addKnob (amp, pre + "amp_pan", "Pan", 96, 34, 30, 48);
+        addKnob (amp, pre + "amp_velocity", "Veloc", 96, 100, 30, 48);
+        addKnob (amp, pre + "amp_drive", "Drive", 8, 140, 30, 48);
+        addToggle (amp, pre + "amp_dist", "DIST", 100, 172, 60, 22)->setTooltip ("Distortion on / off (Drive sets the amount)");
+
+        // ---- row 2: ENV 1, ENV 2, LFO 1, LFO 2, MOD MATRIX, VOICE ----
+        const char* envTitle[2] = { "ENV 1  FILTER", "ENV 2  AMP" };
+        for (int n = 1; n <= 2; ++n)
+        {
+            const juce::String id = pre + "env" + juce::String (n) + "_";
+            auto* e = addSection (envTitle[n - 1], n == 1 ? 26 : 234, 326, 200, 238);
+            auto* ev = addView<pastel::EnvView> (e, { 10, 32, 180, 118 }, proc.apvts,
+                                                 juce::StringArray { id + "a", id + "d", id + "s", id + "r" }, juce::String());
+            ev->setShowValues (false);   // the knobs underneath carry the readouts
+            ev->setTooltip ("Drag the points: attack, decay / sustain, release (double-click = defaults)");
+            const char* kl[4] = { "A", "D", "S", "R" };
+            const char* ks[4] = { "a", "d", "s", "r" };
+            for (int k = 0; k < 4; ++k) addKnob (e, id + ks[k], kl[k], k * 46, 156, 28, 44);
+        }
+        for (int n = 1; n <= 2; ++n)
+        {
+            const juce::String id = pre + "lfo" + juce::String (n) + "_";
+            auto* l = addSection ("LFO " + juce::String (n), n == 1 ? 442 : 640, 326, 190, 238);
+            addView<pastel::LfoView> (l, { 10, 32, 170, 46 }, proc.apvts, id + "wave", juce::String(),
+                                      std::vector<Wave> { Wave::sine, Wave::tri, Wave::square, Wave::saw, Wave::snh });
+            addSeg (l, id + "wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 84, 30, 22, 5);
+            addKnob (l, id + "rate", "Rate", 22, 108, 32);
+            addKnob (l, id + "depth", "Depth", 106, 108, 32);
+            addChoice (l, id + "sync", "", 8, 186, 84)->setTooltip ("Tempo sync: a note value replaces the Rate knob");
+            addChoice (l, id + "keysync", "", 98, 186, 84)->setTooltip ("Key sync. Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
+            caption (l, "SYNC", { 8, 170, 84, 14 });
+            caption (l, "KEY SYNC", { 98, 170, 84, 14 });
+        }
+        auto* mm = addSection ("MOD MATRIX", 838, 326, 250, 238);
+        caption (mm, "SOURCE", { 8, 30, 84, 14 });
+        caption (mm, "DESTINATION", { 96, 30, 104, 14 });
+        caption (mm, "AMT", { 204, 30, 40, 14 });
+        for (int i = 1; i <= 4; ++i)
+        {
+            const int y = 50 + (i - 1) * 44;
+            const juce::String id = pre + "mod" + juce::String (i) + "_";
+            addChoice (mm, id + "src", "", 8, y, 84);
+            addChoice (mm, id + "dst", "", 96, y, 104);
+            addKnob (mm, id + "amt", "", 200, y - 6, 28);
+        }
+        auto* vo = addSection ("VOICE", 1096, 326, 158, 238);
+        addChoice (vo, pre + "voice_assign", "", 8, 32, 142)->setTooltip ("Poly; Mono: one voice with note priority; Unison: four stacked, detuned voices");
+        addChoice (vo, pre + "voice_trigger", "", 8, 60, 68)->setTooltip ("Mono / Unison: Single = overlapping keys slide (legato), Multi = every key restarts the envelopes");
+        addChoice (vo, pre + "voice_priority", "", 82, 60, 68)->setTooltip ("Mono / Unison: which held key sounds");
+        addKnob (vo, pre + "voice_poly", "Poly", -2, 88, 26, 46);
+        addKnob (vo, pre + "voice_detune", "Detune", 48, 88, 26, 46);
+        addKnob (vo, pre + "voice_unidet", "Uni Det", 98, 88, 26, 46)->setTooltip ("Unison detune width in cents");
+        addKnob (vo, pre + "voice_portamento", "Porta", 23, 160, 26, 46);
+        addKnob (vo, pre + "voice_vib", "Vib", 73, 160, 26, 46);
     };
-    addChoice (ar, "arp_mode", "Mode", 86, 50, 120);
-    addChoice (ar, "arp_rate", "Rate", 86, 94, 120);
-    addKnob (ar, "arp_gate", "Gate", 220, 58, 40);
-    addKnob (ar, "arp_octaves", "Oct", 278, 58, 40);
-    addKnob (ar, "arp_swing", "Swing", 336, 58, 40);
-    addKnob (ar, "song_tempo", "Tempo", 394, 58, 40);
+    makeTimbrePage (0);
+    makeTimbrePage (1);
+
+    // ================= shared by both timbres =================
+    buildParent = this;
+    auto* ar = addSection ("ARPEGGIATOR", 16, 596, 330, 294);
+    addToggle (ar, "arp_on", "ON", 12, 34, 56, 24);
+    static_cast<juce::ToggleButton*> (owned.back().get())->getProperties().set ("togRed", true);
+    addToggle (ar, "arp_latch", "LATCH", 72, 34, 64, 24);
     {
-        // STEPS: eight on/off toggles (an off step is a rest) + LAST STEP
-        auto* cap = new juce::Label ("STEPS", "STEPS");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        ar->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (8, 134, 44, 18);
-        for (int k = 1; k <= 8; ++k)
-            addToggle (ar, "arp_step" + juce::String (k), juce::String (k), 54 + (k - 1) * 27, 134, 25, 18);
+        auto* arpOff = new juce::TextButton ("OFF");
+        arpOffBtn = arpOff;
+        ar->addAndMakeVisible (arpOff); owned.emplace_back (arpOff);
+        arpOff->setBounds (140, 34, 52, 24);
+        arpOff->onClick = [&]
+        {
+            for (auto* pid : { "arp_on", "arp_latch" })
+                if (auto* prm = proc.apvts.getParameter (pid))
+                {
+                    prm->beginChangeGesture();
+                    prm->setValueNotifyingHost (0.0f);
+                    prm->endChangeGesture();
+                }
+        };
+    }
+    addChoice (ar, "arp_rate", "", 200, 34, 118)->setTooltip ("Arp rate");
+    // STEPS: eight cells you click on and off (an off step is a rest) + LAST STEP
+    for (int k = 1; k <= 8; ++k)
+        addToggle (ar, "arp_step" + juce::String (k), juce::String (k), 12 + (k - 1) * 38, 68, 34, 46)
+            ->setTooltip ("Step " + juce::String (k) + ": on / rest");
+    {
         auto* lc = new juce::Label ("LAST", "LAST");
         lc->setColour (juce::Label::textColourId, NanoColors::dim);
-        ar->addAndMakeVisible (lc); owned.emplace_back (lc); lc->setBounds (276, 134, 38, 18);
+        setOwnFont (*lc, look.titleFont (10.0f));
+        ar->addAndMakeVisible (lc); owned.emplace_back (lc); lc->setBounds (12, 122, 40, 18);
         auto* last = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
         last->setTextBoxStyle (juce::Slider::TextBoxRight, true, 26, 18);
         last->setTooltip ("Last step: the pattern of on/off steps repeats after this many");
         ar->addAndMakeVisible (last); owned.emplace_back (last);
-        last->setBounds (314, 134, 146, 18);
+        last->setBounds (52, 122, 266, 18);
         sAtt.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "arp_last_step", *last));
         last->setRange (1.0, 8.0, 1.0);
         last->setNumDecimalPlacesToDisplay (0);
     }
+    addChoice (ar, "arp_mode", "", 12, 148, 150)->setTooltip ("Arp mode");
+    addKnob (ar, "arp_gate", "Gate", 12, 184, 34);
+    addKnob (ar, "arp_octaves", "Oct", 90, 184, 34);
+    addKnob (ar, "arp_swing", "Swing", 168, 184, 34);
+    addKnob (ar, "song_tempo", "Tempo", 246, 184, 34);
 
-    buildParent = &page0;
-    auto* vo = addSection ("VOICE", 484, 730, 400, 160);
-    addChoice (vo, "voice_assign", "Assign", 14, 30, 116)->setTooltip ("Poly; Mono: one voice with note priority; Unison: four stacked, detuned voices");
-    addChoice (vo, "voice_trigger", "Trigger", 142, 30, 116)->setTooltip ("Mono / Unison: Single = overlapping keys slide (legato), Multi = every key restarts the envelopes");
-    addChoice (vo, "voice_priority", "Priority", 270, 30, 116)->setTooltip ("Mono / Unison: which held key sounds");
-    addKnob (vo, "voice_poly", "Poly", 8, 80, 36);
-    addKnob (vo, "voice_detune", "Detune", 84, 80, 36);
-    addKnob (vo, "voice_unidet", "Uni Det", 160, 80, 36)->setTooltip ("Unison detune width in cents");
-    addKnob (vo, "voice_portamento", "Porta", 236, 80, 36);
-    addKnob (vo, "voice_vib", "Vib", 312, 80, 36);
-
-    buildParent = &page1; buildTimbre = 1;
+    // FX: a 3 x 2 grid of half-height cards in signal order (left to right,
+    // top then bottom). DRIVE, SATURATION and REVERB extend the classic VA chain.
+    // Each card: picture (drag) on the left, ON / mix on the right, the mode
+    // strip along the bottom; the knobs the pictures replace are gone, their
+    // values show in the picture readouts.
+    using FS = pastel::FxView::Style;
+    constexpr int cw = 222, ch = 143, gx = 354, gy = 596;
+    auto cardAt = [&] (const juce::String& title, int col, int row)
     {
-    auto* osc1 = addSection ("OSC 1", 8, 56, 340, 256);
-    addChoice (osc1, "t2_osc1_wave", "Wave", 8, 28, 120);
-    addChoice (osc1, "t2_osc1_digital", "Digital", 8, 68, 120);
-    addAndMakeVisible (importBtn2);
-    importBtn2.onClick = [&] { importWaveFile (1, 0); };
-    osc1->addAndMakeVisible (importBtn2);
-    importBtn2.setBounds (8, 112, 120, 22);
-    folderBtn2.onClick = [&] { importWaveFolder (1, 0); };
-    osc1->addAndMakeVisible (folderBtn2);
-    folderBtn2.setBounds (8, 140, 120, 22);
-    waveNameLabel2.setText (proc.hasUserWave() ? proc.getUserWaveName() : "No user wave",
-                           juce::dontSendNotification);
-    waveNameLabel2.setColour (juce::Label::textColourId, NanoColors::dim);
-    osc1->addAndMakeVisible (waveNameLabel2);
-    waveNameLabel2.setBounds (8, 164, 120, 22);
-    waveNameLabel2.setJustificationType (juce::Justification::centred);
-    setOwnFont (waveNameLabel2, look.uiFont (11.0f));
-    addKnob (osc1, "t2_osc1_octave", "Octave", 136, 64, 36, 50);
-    addKnob (osc1, "t2_osc1_pitch", "Pitch", 186, 64, 36, 50);
-    addKnob (osc1, "t2_osc1_fine", "Fine", 236, 64, 36, 50);
-    addKnob (osc1, "t2_osc1_level", "Level", 286, 64, 36, 50);
-    addKnob (osc1, "t2_osc1_shape", "Shape", 136, 148, 36, 50);
-    addKnob (osc1, "t2_osc1_pwm", "PWM", 186, 148, 36, 50);
-    addKnob (osc1, "t2_osc1_xmod", "X-Mod", 236, 148, 36, 50);
-    addModButton (osc1, "SYNC", true, 0, 8, 190, 120, 24);
-    addModButton (osc1, "RING", false, 0, 8, 220, 120, 24);
-
-    auto* osc2 = addSection ("OSC 2", 354, 56, 340, 256);
-    addChoice (osc2, "t2_osc2_wave", "Wave", 8, 28, 120);
-    addChoice (osc2, "t2_osc2_digital", "Digital", 8, 68, 120);
-    impBtnO2[1].setButtonText ("IMPORT WAV");
-    osc2->addAndMakeVisible (impBtnO2[1]);
-    impBtnO2[1].setBounds (8, 112, 120, 22);
-    impBtnO2[1].onClick = [&] { importWaveFile (1, 1); };
-    fldBtnO2[1].setButtonText ("FOLDER");
-    osc2->addAndMakeVisible (fldBtnO2[1]);
-    fldBtnO2[1].setBounds (8, 140, 120, 22);
-    fldBtnO2[1].onClick = [&] { importWaveFolder (1, 1); };
-    initWaveLabel (osc2, waveNameO2[1]);
-    addModButton (osc2, "SYNC", true, 1, 8, 190, 120, 24);
-    addModButton (osc2, "RING", false, 1, 8, 220, 120, 24);
-    addKnob (osc2, "t2_osc2_octave", "Octave", 136, 64, 36, 50);
-    addKnob (osc2, "t2_osc2_pitch", "Pitch", 186, 64, 36, 50);
-    addKnob (osc2, "t2_osc2_fine", "Fine", 236, 64, 36, 50);
-    addKnob (osc2, "t2_osc2_level", "Level", 286, 64, 36, 50);
-    addKnob (osc2, "t2_osc2_shape", "Shape", 136, 148, 36, 50);
-    addKnob (osc2, "t2_osc2_pwm", "PWM", 186, 148, 36, 50);
-    addKnob (osc2, "t2_osc2_xmod", "X-Mod", 236, 148, 36, 50);
-    auto* mixer = addSection ("MIXER", 700, 56, 190, 256);
-    addKnob (mixer, "t2_mix_o1", "Osc 1", 24, 54, 52);
-    addKnob (mixer, "t2_mix_o2", "Osc 2", 114, 54, 52);
-    addKnob (mixer, "t2_mix_noise", "Noise", 24, 146, 52);
-    addKnob (mixer, "t2_fm_amt", "FM", 114, 146, 52);
-
-    auto* filt = addSection ("FILTER", 8, 318, 350, 190);
+        return addSection (title, gx + col * (cw + 8), gy + row * (ch + 8), cw, ch);
+    };
+    const juce::Rectangle<int> pic { 10, 30, 140, 84 }, picTall { 10, 30, 140, 104 },
+                               seg { 10, 118, 202, 18 };
+    auto onSwitch = [&] (juce::Component* c, const juce::String& pid)
     {
-        auto* cap = new juce::Label ("TYPE", "TYPE");
-        cap->setColour (juce::Label::textColourId, NanoColors::dim);
-        filt->addAndMakeVisible (cap); owned.emplace_back (cap); cap->setBounds (8, 62, 150, 14);
-        cap->setJustificationType (juce::Justification::centred);
-    }
-    auto* fstrip = addSeg (filt, "t2_filter_type",
-                           { "LP24", "LP12", "BP12", "HP12" }, true, 8, 80, 72, 26, 2);
-    juce::ignoreUnused (fstrip);
-    addKnob (filt, "t2_filter_cutoff", "Cutoff", 176, 24, 52);
-    addKnob (filt, "t2_filter_reso", "Reso", 254, 24, 52);
-    addKnob (filt, "t2_filter_keytrack", "KeyTrk", 176, 108, 52);
-    addKnob (filt, "t2_filter_envamt", "EnvAmt", 254, 108, 52);
+        addToggle (c, pid, "ON", 158, 30, 54, 22);
+    };
 
-    auto* amp = addSection ("AMP", 364, 318, 230, 190);
-    addKnob (amp, "t2_amp_level", "Level", 8, 60, 52);
-    addKnob (amp, "t2_amp_pan", "Pan", 60, 60, 52);
-    addKnob (amp, "t2_amp_velocity", "Veloc", 112, 60, 52);
-    addKnob (amp, "t2_amp_drive", "Drive", 164, 60, 52);
-    addToggle (amp, "t2_amp_dist", "DIST", 164, 146, 52, 26);
+    auto* drv = cardAt ("DRIVE", 0, 0);
+    onSwitch (drv, "drive_on");
+    auto* drvView = addView<pastel::DriveView> (drv, picTall, proc.apvts, "drive_amount");
+    drvView->setTooltip ("Drag up / down: drive");
+    driveViews[0] = drvView;
+    addKnob (drv, "drive_mix", "Mix", 156, 62, 30);
 
-    auto* e1 = addSection ("ENV 1 (FILTER)", 8, 514, 220, 210);
-    addKnob (e1, "t2_env1_a", "A", 44, 44, 40);
-    addKnob (e1, "t2_env1_d", "D", 120, 44, 40);
-    addKnob (e1, "t2_env1_s", "S", 44, 122, 40);
-    addKnob (e1, "t2_env1_r", "R", 120, 122, 40);
+    auto* sat = cardAt ("SATURATION", 1, 0);
+    onSwitch (sat, "sat_on");
+    auto* satView = addView<pastel::DriveView> (sat, pic, proc.apvts, "sat_amount", "sat_mode");
+    satView->setTooltip ("Drag up / down: amount");
+    driveViews[1] = satView;
+    addView<pastel::SegChoice> (sat, seg, proc.apvts, "sat_mode", juce::StringArray { "TAPE", "TUBE" });
+    addKnob (sat, "sat_tone", "Tone", 156, 56, 30);
 
-    auto* e2 = addSection ("ENV 2 (AMP)", 234, 514, 220, 210);
-    addKnob (e2, "t2_env2_a", "A", 44, 44, 40);
-    addKnob (e2, "t2_env2_d", "D", 120, 44, 40);
-    addKnob (e2, "t2_env2_s", "S", 44, 122, 40);
-    addKnob (e2, "t2_env2_r", "R", 120, 122, 40);
+    auto* mfx = cardAt ("MOD FX", 2, 0);
+    addView<pastel::FxView> (mfx, pic, proc.apvts, FS::chorus, "modfx_rate", "modfx_depth", "modfx_type",
+                             juce::String(), juce::String(), "RATE", "DEPTH")
+        ->setTooltip ("Drag: rate sideways, depth up / down (click to switch an Off effect on)");
+    addView<pastel::SegChoice> (mfx, seg, proc.apvts, "modfx_type",
+                                juce::StringArray { "OFF", "CHORUS", "FLANGE", "PHASER" });
+    addKnob (mfx, "modfx_mix", "Mix", 156, 40, 30);
 
-    auto* l1 = addSection ("LFO 1", 460, 514, 235, 210);
-    addSeg (l1, "t2_lfo1_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
-    addKnob (l1, "t2_lfo1_rate", "Rate", 49, 72, 40);
-    addKnob (l1, "t2_lfo1_depth", "Depth", 129, 72, 40);
-    addChoice (l1, "t2_lfo1_sync", "Sync", 8, 148, 104);
-    addChoice (l1, "t2_lfo1_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
+    auto* dl = cardAt ("DELAY", 0, 1);
+    addView<pastel::FxView> (dl, pic, proc.apvts, FS::delay,
+                             "delay_time", "delay_feedback", "delay_mix", "delay_sync")
+        ->setTooltip ("Drag: time sideways (when not synced), feedback up / down");
+    addView<pastel::SegChoice> (dl, seg, proc.apvts, "delay_type",
+                                juce::StringArray { "STEREO", "CROSS", "PING-PONG" });
+    addChoice (dl, "delay_sync", "", 156, 30, 58)->setTooltip ("Tempo sync: a note value at the song / host tempo replaces TIME (Off = TIME knob)");
+    addKnob (dl, "delay_mix", "Mix", 156, 56, 30);
 
-    auto* l2 = addSection ("LFO 2", 701, 514, 235, 210);
-    addSeg (l2, "t2_lfo2_wave", { "SIN", "TRI", "SQR", "SAW", "RND" }, false, 10, 36, 38, 24, 5);
-    addKnob (l2, "t2_lfo2_rate", "Rate", 49, 72, 40);
-    addKnob (l2, "t2_lfo2_depth", "Depth", 129, 72, 40);
-    addChoice (l2, "t2_lfo2_sync", "Sync", 8, 148, 104);
-    addChoice (l2, "t2_lfo2_keysync", "Key Sync", 122, 148, 104)->setTooltip ("Off: free-running; Timbre: restarts on a new phrase, later notes follow; Voice: restarts with every note");
+    auto* rv = cardAt ("REVERB", 1, 1);
+    onSwitch (rv, "reverb_on");
+    addView<pastel::FxView> (rv, picTall, proc.apvts, FS::reverb, "reverb_size", "reverb_damp", "reverb_on",
+                             juce::String(), juce::String(), "SIZE", "DAMP")
+        ->setTooltip ("Drag: size sideways, damping up / down (click to switch reverb on)");
+    addKnob (rv, "reverb_mix", "Mix", 156, 62, 30);
 
-    auto* mm = addSection ("MOD MATRIX", 942, 514, 330, 210);
+    auto* eq = cardAt ("EQ", 2, 1);
+    addView<pastel::EqView> (eq, { 10, 30, 202, 104 }, proc.apvts, "eq_low", "eq_high")
+        ->setTooltip ("Drag the left / right half: low / high shelf (double-click = flat)");
+
+    auto* ou = addSection ("OUTPUT", 1044, 596, 220, 294);
     {
-        const char* heads[3] = { "SOURCE", "DESTINATION", "AMOUNT" };
-        int hxs[3] = { 8, 122, 256 };
-        int hws[3] = { 108, 130, 66 };
-        for (int i = 0; i < 3; ++i)
-        {
-            auto* cap = new juce::Label (heads[i], heads[i]);
-            cap->setColour (juce::Label::textColourId, NanoColors::dim);
-            mm->addAndMakeVisible (cap); owned.emplace_back (cap);
-            cap->setBounds (hxs[i], 30, hws[i], 14);
-            cap->setJustificationType (juce::Justification::centred);
-        }
+        auto* scopeView = new ScopeView();
+        scopeViews.push_back (scopeView);
+        ou->addAndMakeVisible (scopeView);
+        owned.emplace_back (scopeView);
+        scopeView->setBounds (12, 34, 196, 108);
+        auto* meterView = new MeterView (proc);
+        meterViews.push_back (meterView);
+        ou->addAndMakeVisible (meterView);
+        owned.emplace_back (meterView);
+        meterView->setBounds (12, 150, 196, 40);
     }
-    const char* ss[4] = { "t2_mod1_src", "t2_mod2_src", "t2_mod3_src", "t2_mod4_src" };
-    const char* dd[4] = { "t2_mod1_dst", "t2_mod2_dst", "t2_mod3_dst", "t2_mod4_dst" };
-    const char* aa[4] = { "t2_mod1_amt", "t2_mod2_amt", "t2_mod3_amt", "t2_mod4_amt" };
-    for (int i = 0; i < 4; ++i)
-    {
-        int y = 52 + i * 42;
-        addChoice (mm, ss[i], "", 8, y, 108);
-        addChoice (mm, dd[i], "", 122, y, 130);
-        addKnob (mm, aa[i], "", 261, y - 4, 30); // knob centred under AMOUNT
-    }
-
-    // ---- Row 4 ----
-    auto* vo = addSection ("VOICE", 484, 730, 400, 160);
-    addChoice (vo, "t2_voice_assign", "Assign", 14, 30, 116)->setTooltip ("Poly; Mono: one voice with note priority; Unison: four stacked, detuned voices");
-    addChoice (vo, "t2_voice_trigger", "Trigger", 142, 30, 116)->setTooltip ("Mono / Unison: Single = overlapping keys slide (legato), Multi = every key restarts the envelopes");
-    addChoice (vo, "t2_voice_priority", "Priority", 270, 30, 116)->setTooltip ("Mono / Unison: which held key sounds");
-    addKnob (vo, "t2_voice_poly", "Poly", 8, 80, 36);
-    addKnob (vo, "t2_voice_detune", "Detune", 84, 80, 36);
-    addKnob (vo, "t2_voice_unidet", "Uni Det", 160, 80, 36)->setTooltip ("Unison detune width in cents");
-    addKnob (vo, "t2_voice_portamento", "Porta", 236, 80, 36);
-    addKnob (vo, "t2_voice_vib", "Vib", 312, 80, 36);
-
-    }
-
-    buildParent = this;
-    auto* ou = addSection ("OUTPUT", 890, 730, 382, 160);
-    addKnob (ou, "output_level", "Level", 8, 56, 52);
-    addKnob (ou, "master_tune", "MTune", 316, 34, 36, 56);
-    addKnob (ou, "bend_range", "Bend", 316, 94, 36, 56)->setTooltip ("Pitch bend range, semitones each way");
-    auto* meterView = new MeterView (proc);
-    meterViews.push_back (meterView);
-    ou->addAndMakeVisible (meterView);
-    owned.emplace_back (meterView);
-    meterView->setBounds (76, 66, 230, 60);
+    addKnob (ou, "output_level", "Level", 4, 198, 44);
+    addKnob (ou, "master_tune", "MTune", 86, 202, 30, 52);
+    addKnob (ou, "bend_range", "Bend", 154, 202, 30, 52)->setTooltip ("Pitch bend range, semitones each way");
 
     refreshValues();
     startTimerHz (30);
@@ -725,6 +609,7 @@ void FrogContent::selectPage (int i)
     page1.setVisible (curPage == 1);
     tabT1.setToggleState (curPage == 0, juce::dontSendNotification);
     tabT2.setToggleState (curPage == 1, juce::dontSendNotification);
+    repaint();   // the active folder tab opens into the timbre panel
 }
 
 bool FrogContent::isPageVisible (int i) const
@@ -1217,10 +1102,30 @@ void FrogContent::importWaveFolder (int timbre, int osc)
 void FrogContent::paint (juce::Graphics& g)
 {
     g.fillAll (NanoColors::bg);
-    g.setColour (NanoColors::header);
-    g.fillRect (0, 0, getWidth(), 46);
+    // the Pastel family mark: four rounded squares
+    const juce::uint32 cols[4] = { 0xffe88a8a, 0xff8fd0c2, 0xffe9a3b8, 0xffa9d58e };
+    for (int i = 0; i < 4; ++i)
+    {
+        g.setColour (juce::Colour (cols[i]));
+        g.fillRoundedRectangle (14.0f + (float) (i % 2) * 10.0f, 13.0f + (float) (i / 2) * 10.0f, 8.0f, 8.0f, 2.0f);
+    }
     g.setColour (NanoColors::border);
-    g.drawLine (0, 46, (float) getWidth(), 46, 1.0f);
+    g.drawLine (8, 46, (float) getWidth() - 8, 46, 1.0f);
+    // the timbre panel under its folder tabs (the active tab opens into it)
+    const auto box = juce::Rectangle<float> (16.0f, 82.0f, 1248.0f, 492.0f);
+    g.setColour (juce::Colour (0xff141415));
+    g.fillRoundedRectangle (box, 8.0f);
+    g.setColour (NanoColors::accent.withAlpha (0.35f));
+    g.drawRoundedRectangle (box.reduced (0.5f), 8.0f, 1.0f);
+    const auto tab = (curPage == 0 ? tabT1 : tabT2).getBounds().toFloat();
+    g.setColour (juce::Colour (0xff141415));
+    g.fillRect (tab.getX() + 1.0f, 80.0f, tab.getWidth() - 2.0f, 4.0f);
+    // shared section caption
+    g.setColour (NanoColors::accent);
+    g.fillEllipse (19.0f, 581.0f, 6.0f, 6.0f);
+    g.setColour (NanoColors::dim);
+    g.setFont (look.titleFont (10.5f));
+    g.drawText (juce::String::fromUTF8 ("SHARED  \xc2\xb7  ARP  >  DRIVE  >  SATURATION  >  MOD FX  >  DELAY  >  REVERB  >  EQ  >  OUTPUT"), 30, 576, 600, 16, juce::Justification::centredLeft);
 }
 
 void FrogContent::resized()
@@ -1228,8 +1133,8 @@ void FrogContent::resized()
     if (secLayout.empty()) return;
     for (auto& [g, r] : secLayout) g->setBounds (r);
     if (browser != nullptr) browser->setBounds (getLocalBounds());
-    presetLabel.setBounds (10, 2, 148, 42);
-    setOwnFont (presetLabel, look.logoFont (24.0f));
+    presetLabel.setBounds (38, 2, 126, 42);
+    setOwnFont (presetLabel, look.logoFont (19.0f));
     prevBtn.setBounds (166, 11, 28, 24);
     nextBtn.setBounds (196, 11, 28, 24);
     presetBox.setBounds (230, 11, 236, 24);
@@ -1243,6 +1148,11 @@ void FrogContent::timerCallback()
     redoBtn.setEnabled (proc.canRedo());
     refreshValues();
     refreshStrips();
+    // the drive pictures have no on-switch of their own: dim them while off
+    for (auto [v, pid] : { std::pair { driveViews[0], "drive_on" }, std::pair { driveViews[1], "sat_on" } })
+        if (v != nullptr)
+            if (auto* raw = proc.apvts.getRawParameterValue (pid))
+                v->setAlpha (raw->load() > 0.5f ? 1.0f : 0.45f);
     syncModButtons (0);
     syncModButtons (1);
     if (presetBox.getSelectedItemIndex() != proc.getCurrentProgram())

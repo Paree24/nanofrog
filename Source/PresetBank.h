@@ -20,7 +20,7 @@ struct NanoPreset
 
 namespace PresetBank
 {
-    constexpr int kParamCount = 175;
+    constexpr int kParamCount = 186;
     extern const char* const kParamIds[kParamCount];
 
     void ensureLoaded(); // idempotent: JSON bank, else Init fallback

@@ -177,6 +177,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout NanoFrogProcessor::createPar
     F ("", "delay_mix","Delay Mix", 0, 1, 0.0f);
     F ("", "eq_low","EQ Low", -12, 12, 0);
     F ("", "eq_high","EQ High", -12, 12, 0);
+    // extensions beyond the classic VA chain (from Pastel Sampler): off by default,
+    // so every existing patch is untouched
+    B ("", "drive_on","Drive On", false);
+    F ("", "drive_amount","Drive", 0, 1, 0.45f);
+    F ("", "drive_mix","Drive Mix", 0, 1, 0.8f);
+    B ("", "sat_on","Saturation On", false);
+    F ("", "sat_amount","Sat Amount", 0, 1, 0.3f);
+    F ("", "sat_tone","Sat Tone", 0, 1, 0.6f);
+    C ("", "sat_mode","Sat Mode", {"Tape","Tube"}, 0);
+    B ("", "reverb_on","Reverb On", false);
+    F ("", "reverb_size","Reverb Size", 0, 1, 0.45f);
+    F ("", "reverb_damp","Reverb Damp", 0, 1, 0.5f);
+    F ("", "reverb_mix","Reverb Mix", 0, 1, 0.3f);
     B ("", "arp_on","Arp On", false);
     C ("", "arp_mode","Arp Mode", {"Up","Down","Alt1","Alt2","Random","Trigger"}, 0);
     C ("", "arp_rate","Arp Rate", {"1/4","1/8","1/16","1/8T","1/16T","1/32","1/6"}, 2);
@@ -327,6 +340,9 @@ void NanoFrogProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     modfx.setSampleRate (sampleRate);
     delay.setSampleRate (sampleRate);
     eq.setSampleRate (sampleRate);
+    drive.reset();
+    sat.setSampleRate (sampleRate);
+    reverb.setSampleRate (sampleRate);
     monoScratch.assign ((size_t) juce::jmax (1, samplesPerBlock), 0.0f);
     limiter.prepare (sampleRate);
     setLatencySamples (limiter.latency()); // lookahead, held while the limiter is off
@@ -752,7 +768,12 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (; midiIt != midiEnd; ++midiIt) // stray events past the block end
         handleMidi ((*midiIt).getMessage());
 
-    // FX chain: modfx -> delay -> eq -> output level
+    // FX chain: drive -> saturation -> modfx -> delay -> reverb -> eq -> output level
+    // (drive / saturation / reverb are extensions; each skips when off)
+    if (pv (apvts, "drive_on") > 0.5f)
+        drive.process (L, Rp, n, pv (apvts, "drive_amount"), pv (apvts, "drive_mix"));
+    if (pv (apvts, "sat_on") > 0.5f)
+        sat.process (L, Rp, n, pv (apvts, "sat_amount"), pv (apvts, "sat_tone"), (int) pv (apvts, "sat_mode"));
     int mtype = (int) pv (apvts, "modfx_type");
     modfx.process (L, Rp, n, mtype, pv (apvts, "modfx_rate"), pv (apvts, "modfx_depth"), pv (apvts, "modfx_mix"));
     int dtype = (int) pv (apvts, "delay_type");
@@ -760,6 +781,14 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int dsync = (int) pv (apvts, "delay_sync");
     const float syncMs = dsync > 0 ? (float) (kSyncBeats[juce::jlimit (0, 14, dsync - 1)] * 60000.0 / juce::jmax (20.0, effBpm)) : -1.0f;
     delay.process (L, Rp, n, dtype, pv (apvts, "delay_time"), pv (apvts, "delay_feedback"), pv (apvts, "delay_mix"), syncMs);
+    {
+        // a reverb switched back on starts empty, never replays an old tail
+        const bool revOn = pv (apvts, "reverb_on") > 0.5f;
+        if (revOn && ! reverbWasOn) reverb.reset();
+        reverbWasOn = revOn;
+        if (revOn)
+            reverb.process (L, Rp, n, pv (apvts, "reverb_size"), pv (apvts, "reverb_damp"), pv (apvts, "reverb_mix"));
+    }
     eq.process (L, Rp, n, pv (apvts, "eq_low"), pv (apvts, "eq_high"));
     float out = pv (apvts, "output_level");
     bool limOn = pv (apvts, "limiter") > 0.5f;
@@ -850,7 +879,8 @@ int NanoFrogProcessor::mutateGroup (const juce::String& b)
     if (b.startsWith ("amp_") || b.startsWith ("env")) return MG_AMP_EG;
     if (b.startsWith ("lfo")) return MG_LFO;
     if (b.startsWith ("mod") && ! b.startsWith ("modfx")) return MG_PATCH;
-    if (b.startsWith ("modfx") || b.startsWith ("delay") || b.startsWith ("eq_")) return MG_FX;
+    if (b.startsWith ("modfx") || b.startsWith ("delay") || b.startsWith ("eq_")
+        || b.startsWith ("drive_") || b.startsWith ("sat_") || b.startsWith ("reverb_")) return MG_FX;
     if (b.startsWith ("arp")) return MG_ARP;
     return -1;
 }
@@ -891,6 +921,8 @@ void NanoFrogProcessor::mutateCurrentPatch()
     bool modfxLive = ((int) std::round (rawOf ("modfx_type")) != 0
                       && rawOf ("modfx_mix") > 0.0f);
     bool delayLive = rawOf ("delay_mix") > 0.0f;
+    bool driveLive = rawOf ("drive_on") > 0.5f, satLive = rawOf ("sat_on") > 0.5f,
+         reverbLive = rawOf ("reverb_on") > 0.5f;
     struct TimbreGate
     {
         bool lfoLive[2] = {};
@@ -933,6 +965,7 @@ void NanoFrogProcessor::mutateCurrentPatch()
             || base == "voice_vib" || base == "output_level"
             || base == "master_tune" || base == "song_tempo" || base == "tmix"
             || base == "modfx_type" || base == "delay_type"
+            || base == "drive_on" || base == "sat_on" || base == "reverb_on" || base == "sat_mode"
             || base.startsWith ("voice_assign") || base == "voice_trigger" || base == "voice_priority"
             || base.endsWith ("_keysync") || base.startsWith ("arp_step") || base == "arp_last_step"
             || base == "bend_range" || base == "delay_sync"
@@ -991,6 +1024,9 @@ void NanoFrogProcessor::mutateCurrentPatch()
             gated = ! modfxLive;
         else if (base == "delay_time" || base == "delay_feedback" || base == "delay_mix")
             gated = ! delayLive;
+        else if (base.startsWith ("drive_")) gated = ! driveLive;
+        else if (base.startsWith ("sat_")) gated = ! satLive;
+        else if (base.startsWith ("reverb_")) gated = ! reverbLive;
         else if (base == "lfo1_rate" || base == "lfo1_depth")
             gated = ! gate[ti].lfoLive[0];
         else if (base == "lfo2_rate" || base == "lfo2_depth")

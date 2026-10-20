@@ -220,7 +220,9 @@ int main()
     FrogContent* ed = &edref;
     CHECK (outer->getWidth() == 1280 && outer->getHeight() == 900,
            "editor size %dx%d, expected 1280x900", outer->getWidth(), outer->getHeight());
-    CHECK (ed->getSectionCount() == 26, "sections %d, expected 26", ed->getSectionCount());
+    // v3 layout: 11 per timbre page + ARPEGGIATOR, DRIVE, SATURATION, MOD FX, DELAY,
+    // REVERB, EQ, OUTPUT (scope inside OUTPUT)
+    CHECK (ed->getSectionCount() == 30, "sections %d, expected 30", ed->getSectionCount());
 
     // recursive geometry: every descendant non-empty and inside its parent
     // (scrollable containers like ListBox legitimately overflow: skipped)
@@ -1251,6 +1253,40 @@ int main()
             for (int i = 8000; i < (int) o.size(); ++i) if (std::abs (o[(size_t) i]) > 0.02f) { echo = i; break; }
             printf ("delay sync echo at %.0f ms\n", echo * 1000.0 / sr);
             CHECK (std::abs (echo * 1000.0 / sr - 500.0) < 25.0, "1/4 delay sync echoes at 500 ms (%.0f ms)", echo * 1000.0 / sr);
+        }
+        // extension FX (drive / saturation / reverb): off by default, each audibly
+        // changes the sound when on, stays finite and bounded
+        {
+            auto render = [&] (const char* onId)
+            {
+                auto q = fresh();
+                set (*q, "osc1_wave", 3); set (*q, "env2_r", 0.02f);
+                if (onId != nullptr) set (*q, onId, 1.0f);
+                return run (*q, 120, { { 0, on (57) }, { sr * 3 / 10, off (57) } }); // 300 ms note
+            };
+            const auto dry = render (nullptr);
+            for (auto* id : { "drive_on", "sat_on", "reverb_on" })
+            {
+                CHECK (fresh()->apvts.getRawParameterValue (id)->load() == 0.0f, "%s defaults off", id);
+                const auto o = render (id);
+                double diff = 0.0, peak = 0.0;
+                bool finite = true;
+                for (size_t i = 0; i < o.size() && i < dry.size(); ++i)
+                {
+                    finite = finite && std::isfinite (o[i]);
+                    diff += std::abs (o[i] - dry[i]);
+                    peak = std::max (peak, (double) std::abs (o[i]));
+                }
+                diff /= (double) o.size();
+                printf ("fx %s: mean |diff| %.4f, peak %.3f\n", id, diff, peak);
+                CHECK (finite && peak < 1.0, "%s output finite and under the ceiling", id);
+                CHECK (diff > 1e-3, "%s audibly changes the sound", id);
+            }
+            // the reverb rings on after the dry voice has gone
+            const auto wet = render ("reverb_on");
+            const int tail = (int) (sr * 1.0);
+            printf ("reverb tail rms %.5f vs dry %.5f\n", rms (wet, tail, 4000), rms (dry, tail, 4000));
+            CHECK (rms (wet, tail, 4000) > 10.0 * rms (dry, tail, 4000) + 1e-5, "reverb leaves a tail");
         }
         // arp ALT2 repeats the end notes; switched-off steps are rests
         {

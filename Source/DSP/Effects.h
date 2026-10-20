@@ -246,3 +246,191 @@ private:
         return float (y);
     }
 };
+
+// ======================================================================
+// Extensions beyond the classic VA effect chain (only mod FX, delay
+// and EQ): drive, saturation and reverb, ported from Pastel Sampler. All
+// default to off, so factory and user presets sound exactly as before.
+// ======================================================================
+
+// ---- Drive: tanh distortion with a darkened tone blend
+class DriveFx
+{
+public:
+    void reset() { toneL = toneR = 0.0f; }
+    // drive01 0..1 (gain 1..50), mix01 0..1
+    void process (float* L, float* R, int n, float drive01, float mix01)
+    {
+        if (drive01 <= 0.0005f || mix01 <= 0.001f) return;
+        const float g = 1.0f + drive01 * 49.0f;
+        const float tone = 0.12f;
+        for (int i = 0; i < n; ++i)
+        {
+            float dL = std::tanh (L[i] * g), dR = std::tanh (R[i] * g);
+            toneL += tone * (dL - toneL);
+            toneR += tone * (dR - toneR);
+            float tL = dL * 0.65f + toneL * 0.35f;
+            float tR = dR * 0.65f + toneR * 0.35f;
+            L[i] = L[i] * (1.0f - mix01) + tL * 0.7f * mix01;
+            R[i] = R[i] * (1.0f - mix01) + tR * 0.7f * mix01;
+        }
+    }
+private:
+    float toneL = 0.0f, toneR = 0.0f;
+};
+
+// ---- Saturation: tape (tanh) / tube (asymmetric soft clip) + DC block + tone
+class SatFx
+{
+public:
+    void setSampleRate (double sr) { fs = sr; reset(); }
+    void reset() { dcL = dcR = lpL = lpR = 0.0f; }
+    // amt 0..1, tone 0..1 (2..18 kHz), mode 0 tape 1 tube
+    void process (float* L, float* R, int n, float amt, float tone, int mode)
+    {
+        if (amt <= 0.001f) return;
+        amt = std::clamp (amt, 0.0f, 1.0f);
+        const float d = 1.0f + amt * 9.0f;
+        const float fc = 2000.0f * std::pow (9.0f, std::clamp (tone, 0.0f, 1.0f));
+        const float g = 1.0f - std::exp (-2.0f * 3.14159265f * fc / (float) fs);
+        const float dcC = 1.0f - std::exp (-2.0f * 3.14159265f * 5.0f / (float) fs);
+        const float post = 1.0f / (1.0f + amt * 1.5f);
+        const float even = mode == 1 ? 0.18f : 0.06f;
+        for (int i = 0; i < n; ++i)
+        {
+            float wL = shape (L[i] * d, mode, even), wR = shape (R[i] * d, mode, even);
+            dcL += dcC * (wL - dcL); wL -= dcL;
+            dcR += dcC * (wR - dcR); wR -= dcR;
+            lpL += g * (wL - lpL); lpR += g * (wR - lpR);
+            L[i] = lpL * post;
+            R[i] = lpR * post;
+        }
+    }
+private:
+    static float shape (float x, int mode, float even)
+    {
+        float s = mode == 1 ? x / (1.0f + 0.5f * std::fabs (x)) : std::tanh (x);
+        return s + even * s * s;
+    }
+    double fs = 44100;
+    float dcL = 0.0f, dcR = 0.0f, lpL = 0.0f, lpR = 0.0f;
+};
+
+// ---- Reverb: 4 modulated damped combs per side + 4 allpasses + predelay
+class ModVerb
+{
+public:
+    void setSampleRate (double sr)
+    {
+        fs = sr;
+        const float combMs[4] = { 47.0f, 53.0f, 44.0f, 58.0f };
+        for (int i = 0; i < 4; ++i)
+        {
+            int maxLen = (int) (sr * 0.13) + 64;
+            for (auto* c : { &cl[i], &cr[i] })
+            {
+                c->buf.assign ((size_t) maxLen, 0.0f);
+                c->len = maxLen; c->pos = 0; c->lp = 0.0f;
+            }
+            cl[i].base = combMs[i] * (float) sr / 1000.0f;
+            cr[i].base = (combMs[i] + 1.1f) * (float) sr / 1000.0f;
+        }
+        const float apMs[4] = { 5.0f, 1.7f, 3.4f, 2.6f };
+        const float apG[4] = { 0.7f, 0.6f, 0.65f, 0.6f };
+        for (int i = 0; i < 4; ++i)
+        {
+            int maxLen = (int) (sr * 0.01) + 16;
+            for (auto* a : { &al[i], &ar[i] })
+            {
+                a->buf.assign ((size_t) maxLen, 0.0f);
+                a->len = maxLen; a->pos = 0; a->g = apG[i];
+            }
+            al[i].d = apMs[i] * (float) sr / 1000.0f;
+            ar[i].d = (apMs[i] + 0.4f) * (float) sr / 1000.0f;
+        }
+        pd.buf.assign ((size_t) ((int) (sr * 0.06) + 16), 0.0f);
+        pd.len = (int) pd.buf.size(); pd.pos = 0;
+        curLenScale = -1.0f;
+    }
+    void reset()
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            for (auto* c : { &cl[i], &cr[i] }) { std::fill (c->buf.begin(), c->buf.end(), 0.0f); c->lp = 0.0f; }
+            for (auto* a : { &al[i], &ar[i] }) std::fill (a->buf.begin(), a->buf.end(), 0.0f);
+        }
+        std::fill (pd.buf.begin(), pd.buf.end(), 0.0f);
+        curLenScale = -1.0f;
+    }
+    // size / damp / mix 0..1
+    void process (float* L, float* R, int n, float size, float damp, float mix)
+    {
+        if (mix <= 0.001f) return;
+        size = std::clamp (size, 0.0f, 1.0f);
+        const float fb = 0.70f + size * 0.25f;
+        const float lpC = 0.55f * (1.0f - std::clamp (damp, 0.0f, 1.0f)) + 0.05f;
+        const float lenScale = 0.75f + size * 0.6f;
+        if (curLenScale < 0.0f) curLenScale = lenScale;
+        // size glides over ~50 ms: the comb lengths never jump (no zipper)
+        const float kLen = 1.0f - std::exp (-1.0f / (0.050f * (float) fs));
+        const float modAmp = (float) ((0.0006 + size * 0.002) * fs);
+        const float rates[4] = { 0.11f, 0.19f, 0.27f, 0.23f };
+        const float wetG = 0.5f + size * 0.7f;
+        const float preD = size * 0.025f * (float) fs;
+        for (int i = 0; i < n; ++i)
+        {
+            curLenScale += (lenScale - curLenScale) * kLen;
+            pd.buf[(size_t) pd.pos] = (L[i] + R[i]) * 0.5f;
+            const float in = readInterp (pd.buf, pd.len, preD, pd.pos);
+            pd.pos = (pd.pos + 1) % pd.len;
+            float accL = 0.0f, accR = 0.0f;
+            for (int c = 0; c < 4; ++c)
+            {
+                mlfo[c] += rates[c] / fs;
+                if (mlfo[c] >= 1.0) mlfo[c] -= 1.0;
+                const float mod = std::sin (6.2831853f * (float) mlfo[c]) * modAmp;
+                accL += runComb (cl[c], in, fb, lpC, mod);
+                accR += runComb (cr[c], in, fb, lpC, -mod);
+            }
+            float wL = accL * 0.25f, wR = accR * 0.25f;
+            for (int a = 0; a < 4; ++a) { wL = runAP (wL, al[a]); wR = runAP (wR, ar[a]); }
+            L[i] = L[i] * (1.0f - mix) + wL * wetG * mix;
+            R[i] = R[i] * (1.0f - mix) + wR * wetG * mix;
+        }
+    }
+private:
+    struct Comb { std::vector<float> buf; int len = 1, pos = 0; float base = 0.0f, lp = 0.0f; };
+    struct AP { std::vector<float> buf; int len = 1, pos = 0; float d = 0.0f, g = 0.65f; };
+    struct PD { std::vector<float> buf; int len = 1, pos = 0; };
+    static float readInterp (const std::vector<float>& b, int len, float ds, int wp)
+    {
+        float rp = (float) wp - ds;
+        while (rp < 0.0f) rp += (float) len;
+        int i0 = (int) rp % len, i1 = (i0 + 1) % len;
+        float fr = rp - std::floor (rp);
+        return b[(size_t) i0] * (1.0f - fr) + b[(size_t) i1] * fr;
+    }
+    float runComb (Comb& c, float in, float fb, float lpC, float mod)
+    {
+        float d = std::clamp (c.base * curLenScale + mod, 4.0f, (float) c.len - 2.0f);
+        float y = readInterp (c.buf, c.len, d, c.pos);
+        c.lp += lpC * (y - c.lp);
+        c.buf[(size_t) c.pos] = in + c.lp * fb;
+        c.pos = (c.pos + 1) % c.len;
+        return y;
+    }
+    static float runAP (float x, AP& a)
+    {
+        int rp = a.pos - (int) a.d;
+        while (rp < 0) rp += a.len;
+        float y = -a.g * x + a.buf[(size_t) (rp % a.len)];
+        a.buf[(size_t) a.pos] = x + a.g * y;
+        a.pos = (a.pos + 1) % a.len;
+        return y;
+    }
+    Comb cl[4], cr[4];
+    AP al[4], ar[4];
+    PD pd;
+    float curLenScale = -1.0f;
+    double fs = 44100, mlfo[4] = { 0.0, 0.25, 0.5, 0.75 };
+};

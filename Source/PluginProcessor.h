@@ -165,6 +165,8 @@ private:
     float bendSemi = 0.0f, modWheel = 0.0f, sustainPedal = 0.0f;
     int sustainHeld[128] = { 0 };
     ModFx modfx; TempoDelay delay; TwoBandEq eq;
+    DriveFx drive; SatFx sat; ModVerb reverb; // extensions (see Effects.h)
+    bool reverbWasOn = false;
     std::atomic<float> meterL { 0.0f }, meterR { 0.0f };
     float outSmoothL = 0.0f, outSmoothR = 0.0f;
     double hostBpm = 120.0;

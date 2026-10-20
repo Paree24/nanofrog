@@ -184,7 +184,18 @@ const char* const kParamIds[kParamCount] = {
     "arp_step7",
     "arp_step8",
     "bend_range",
-    "delay_sync"
+    "delay_sync",
+    "drive_on",
+    "drive_amount",
+    "drive_mix",
+    "sat_on",
+    "sat_amount",
+    "sat_tone",
+    "sat_mode",
+    "reverb_on",
+    "reverb_size",
+    "reverb_damp",
+    "reverb_mix",
 };
 
 // ------------------------------------------------------------------ bank

@@ -2,19 +2,24 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "NanoFrogAssets.h"
+#include "PastelViews.h"
 
-// NanoFrog interface: mock-faithful flat dark-grey panels, lime accents,
-// red highlight states, Lato throughout. Knob sizes follow the mock:
-// BIG (mixer/filter/amp/output), MED (oscillators), SMALL (env/lfo/fx/arp/voice).
+// NanoFrog interface (v3, after Pastel EFX Grid; see mockup/redesign_v3.png):
+// NanoFrog's own near-black panels with its mint and red softened to the
+// nearest pastels (red only for key active states: LP24, ARP ON), dot + title
+// headers, arc knobs, live views you drag, Lato throughout.
 struct NanoColors
 {
     static inline const juce::Colour bg      { 0xff101011 };
     static inline const juce::Colour header   { 0xff141415 };
     static inline const juce::Colour panel    { 0xff1a1a1c };
     static inline const juce::Colour border   { 0xff333336 };
-    static inline const juce::Colour accent   { 0xff82d094 }; // mint: arcs, needles, titles
-    static inline const juce::Colour accentHi { 0xffa5e3b0 };
-    static inline const juce::Colour red      { 0xffd94a4a }; // LP24 / ARP ON active
+    static inline const juce::Colour accent   { 0xff93d9a5 }; // pastel mint: arcs, dots, active states
+    static inline const juce::Colour accentHi { 0xffb6e8c2 };
+    static inline const juce::Colour red      { 0xffe88a8a }; // pastel red: LP24 / ARP ON active
+    static inline const juce::Colour ink      { 0xff151716 }; // text on a filled accent
+    static inline const juce::Colour handle   { 0xfff4f1ec };
+    static inline const juce::Colour inner    { 0xff151516 };
     static inline const juce::Colour text     { 0xffd8d4c7 };
     static inline const juce::Colour dim      { 0xff969589 };
     static inline const juce::Colour track    { 0xff2a2a2c };
@@ -45,6 +50,13 @@ struct NanoLook : juce::LookAndFeel_V4
         setColour (juce::PopupMenu::textColourId, NanoColors::text);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour (0xff222a24));
         setColour (juce::PopupMenu::highlightedTextColourId, NanoColors::accent);
+        // the shared v3 views
+        pastel::Theme::accent = NanoColors::accent;  pastel::Theme::inner = NanoColors::inner;
+        pastel::Theme::grid = juce::Colour (0xff222224); pastel::Theme::edge = NanoColors::border;
+        pastel::Theme::comboBg = NanoColors::comboBg; pastel::Theme::text = NanoColors::text;
+        pastel::Theme::textDim = NanoColors::dim;    pastel::Theme::faint = juce::Colour (0xff5c5b55);
+        pastel::Theme::handle = NanoColors::handle;  pastel::Theme::ink = NanoColors::ink;
+        pastel::Theme::regular = latoReg;            pastel::Theme::bold = latoBold;
     }
 
     juce::Font uiFont (float h) const
@@ -68,53 +80,43 @@ struct NanoLook : juce::LookAndFeel_V4
         if (l.getProperties().contains ("ownFont")) return l.getFont();
         return uiFont (13.0f);
     }
-    juce::Font getComboBoxFont (juce::ComboBox&) override { return uiFont (14.0f); }
+    juce::Font getComboBoxFont (juce::ComboBox&) override { return titleFont (12.5f); }
     juce::Font getPopupMenuFont() override { return uiFont (14.0f); }
     juce::Font getTextButtonFont (juce::TextButton&, int) override { return titleFont (13.5f); }
 
+    // v3 arc knob: neutral track, accent value arc (from zero on bipolar
+    // ranges), body + light needle
     void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos,
                            float start, float end, juce::Slider& slider) override
     {
-        float cx = x + w * 0.5f, cy = y + h * 0.5f;
-        float r = juce::jmin (w, h) * 0.5f - 1.0f;
-        float a = start + pos * (end - start);
-
-        float br = (w <= 36 || h <= 36) ? r - 2.0f : r - 5.0f;
-        g.setColour (NanoColors::knobBody);
-        g.fillEllipse (cx - br, cy - br, br * 2, br * 2);
-        g.setColour (NanoColors::border);
-        g.drawEllipse (cx - br + 0.5f, cy - br + 0.5f, br * 2 - 1, br * 2 - 1, 1.0f);
-
-        float arcR = r - 1.5f;
-        g.setColour (NanoColors::track);
+        const float cx = x + w * 0.5f, cy = y + h * 0.5f;
+        const float r = juce::jmin (w, h) * 0.5f - 1.5f;
+        const float a = start + pos * (end - start);
+        const float sw = juce::jmax (2.4f, r * 0.15f), arcR = r - sw * 0.5f;
+        const auto stroke = juce::PathStrokeType (sw, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
         juce::Path track;
-        track.addArc (cx - arcR, cy - arcR, arcR * 2, arcR * 2, start, end, true);
-        g.strokePath (track, juce::PathStrokeType (2.5f, juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::butt));
+        track.addCentredArc (cx, cy, arcR, arcR, 0.0f, start, end, true);
+        g.setColour (NanoColors::border);
+        g.strokePath (track, stroke);
         float v0 = start;
         if (slider.getMinimum() < 0.0)
             v0 = start + (end - start) * float ((0.0 - slider.getMinimum())
                                                 / (slider.getMaximum() - slider.getMinimum()));
-        if (std::abs (a - v0) > 0.001f)
+        if (std::abs (a - v0) > 0.01f)
         {
-            g.setColour (NanoColors::accent);
             juce::Path val;
-            val.addArc (cx - arcR, cy - arcR, arcR * 2, arcR * 2,
-                        std::min (v0, a), std::max (v0, a), true);
-            g.strokePath (val, juce::PathStrokeType (2.5f, juce::PathStrokeType::curved,
-                                                     juce::PathStrokeType::butt));
+            val.addCentredArc (cx, cy, arcR, arcR, 0.0f, std::min (v0, a), std::max (v0, a), true);
+            g.setColour (NanoColors::accent);
+            g.strokePath (val, stroke);
         }
-        g.setColour (NanoColors::dim.withAlpha (0.6f));
-        for (float ta : { start, end })
-        {
-            float tx = cx + std::cos (ta - 1.5707963f) * (arcR + 2.5f);
-            float ty = cy + std::sin (ta - 1.5707963f) * (arcR + 2.5f);
-            g.fillEllipse (tx - 1.0f, ty - 1.0f, 2.0f, 2.0f);
-        }
-        float dx = std::cos (a - 1.5707963f), dy = std::sin (a - 1.5707963f);
-        g.setColour (NanoColors::accent);
-        g.drawLine (cx + dx * 2.0f, cy + dy * 2.0f,
-                    cx + dx * (br - 2.0f), cy + dy * (br - 2.0f), 2.5f);
+        const float br = r - sw - 1.5f;
+        g.setColour (NanoColors::knobBody);
+        g.fillEllipse (cx - br, cy - br, br * 2, br * 2);
+        g.setColour (NanoColors::border);
+        g.drawEllipse (cx - br, cy - br, br * 2, br * 2, 1.0f);
+        g.setColour (NanoColors::handle);
+        g.drawLine (cx + std::sin (a) * br * 0.25f, cy - std::cos (a) * br * 0.25f,
+                    cx + std::sin (a) * (br - 2.0f), cy - std::cos (a) * (br - 2.0f), 2.0f);
     }
 
     // Mock-style flat rectangle toggle: dark when off, red or lime when on.
@@ -123,16 +125,14 @@ struct NanoLook : juce::LookAndFeel_V4
         bool on = b.getToggleState();
         auto r = b.getLocalBounds().reduced (1).toFloat();
         bool red = (bool) b.getProperties().getWithDefault ("togRed", false);
-        if (on && red)       g.setColour (NanoColors::red);
-        else if (on)         g.setColour (NanoColors::accent.withAlpha (0.28f));
-        else                 g.setColour (NanoColors::comboBg);
-        g.fillRoundedRectangle (r, 3.0f);
-        if (on && red)       g.setColour (NanoColors::red);
-        else if (on)         g.setColour (NanoColors::accent);
-        else                 g.setColour (NanoColors::border);
-        g.drawRoundedRectangle (r, 3.0f, 1.0f);
-        g.setColour (on && red ? juce::Colour (0xff101010)
-                               : on ? NanoColors::accent : NanoColors::dim);
+        g.setColour (on ? (red ? NanoColors::red : NanoColors::accent) : NanoColors::comboBg);
+        g.fillRoundedRectangle (r, 5.0f);
+        if (! on)
+        {
+            g.setColour (NanoColors::border);
+            g.drawRoundedRectangle (r, 5.0f, 1.0f);
+        }
+        g.setColour (on ? NanoColors::ink : NanoColors::dim);
         g.setFont (titleFont (12.5f));
         g.drawText (b.getButtonText(), r, juce::Justification::centred, true);
     }
@@ -141,14 +141,15 @@ struct NanoLook : juce::LookAndFeel_V4
                        juce::ComboBox& box) override
     {
         g.setColour (NanoColors::comboBg);
-        g.fillRoundedRectangle (0, 0, w, h, 3.0f);
+        g.fillRoundedRectangle (0, 0, (float) w, (float) h, 5.0f);
         g.setColour (box.hasKeyboardFocus (true) ? NanoColors::accent : NanoColors::border);
-        g.drawRoundedRectangle (0.5f, 0.5f, w - 1, h - 1, 3.0f, 1.0f);
+        g.drawRoundedRectangle (0.5f, 0.5f, w - 1.0f, h - 1.0f, 5.0f, 1.0f);
         juce::Path arrow;
-        arrow.addTriangle (w - 16.0f, h * 0.5f - 3.0f, w - 8.0f, h * 0.5f - 3.0f,
-                           w - 12.0f, h * 0.5f + 3.0f);
+        arrow.startNewSubPath (w - 15.0f, h * 0.5f - 2.0f);
+        arrow.lineTo (w - 11.0f, h * 0.5f + 2.0f);
+        arrow.lineTo (w - 7.0f, h * 0.5f - 2.0f);
         g.setColour (NanoColors::dim);
-        g.fillPath (arrow);
+        g.strokePath (arrow, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 
     // Mock-style section: dark panel, thin border, lime title text, no bars.
@@ -156,13 +157,15 @@ struct NanoLook : juce::LookAndFeel_V4
                                     const juce::Justification&, juce::GroupComponent&) override
     {
         g.setColour (NanoColors::panel);
-        g.fillRoundedRectangle (0, 0, w, h, 4.0f);
+        g.fillRoundedRectangle (0, 0, (float) w, (float) h, 8.0f);
         g.setColour (NanoColors::border);
-        g.drawRoundedRectangle (0.5f, 0.5f, w - 1, h - 1, 4.0f, 1.0f);
+        g.drawRoundedRectangle (0.5f, 0.5f, w - 1.0f, h - 1.0f, 8.0f, 1.0f);
         g.setColour (NanoColors::accent);
-        g.setFont (titleFont (17.0f));
-        g.drawText (text.toUpperCase(), 0, 4, w, 20,
-                    juce::Justification::centred, false);
+        g.fillEllipse (12.4f, 12.4f, 7.2f, 7.2f);
+        g.setColour (NanoColors::text);
+        g.setFont (logoFont (13.0f));
+        g.drawText (text.toUpperCase(), 26, 4, w - 32, 24,
+                    juce::Justification::centredLeft, false);
     }
 
     void drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&,
@@ -171,14 +174,16 @@ struct NanoLook : juce::LookAndFeel_V4
         float w = (float) b.getWidth(), h = (float) b.getHeight();
         bool active = b.getToggleState();
         bool red = (bool) b.getProperties().getWithDefault ("segRed", false);
-        if (active && red)                  g.setColour (NanoColors::red);
-        else if (active)                    g.setColour (NanoColors::accent.withAlpha (0.30f));
-        else                                g.setColour (down ? juce::Colour (0xff262628) : NanoColors::comboBg);
-        g.fillRoundedRectangle (0, 0, w, h, 3.0f);
-        if (active && red)       g.setColour (NanoColors::red);
-        else if (active)         g.setColour (NanoColors::accent);
-        else                     g.setColour (hover ? NanoColors::accent.withAlpha (0.6f) : NanoColors::border);
-        g.drawRoundedRectangle (0.5f, 0.5f, w - 1, h - 1, 3.0f, 1.0f);
+        if (active)
+        {
+            g.setColour (red ? NanoColors::red : NanoColors::accent);
+            g.fillRoundedRectangle (0, 0, w, h, 5.0f);
+            return;
+        }
+        g.setColour (down ? juce::Colour (0xff262628) : NanoColors::comboBg);
+        g.fillRoundedRectangle (0, 0, w, h, 5.0f);
+        g.setColour (hover ? NanoColors::accent.withAlpha (0.6f) : NanoColors::border);
+        g.drawRoundedRectangle (0.5f, 0.5f, w - 1, h - 1, 5.0f, 1.0f);
     }
 
     // Text is drawn here only (drawing it in the background too painted it
@@ -188,12 +193,11 @@ struct NanoLook : juce::LookAndFeel_V4
         bool active = b.getToggleState();
         bool red = (bool) b.getProperties().getWithDefault ("segRed", false);
         juce::Colour c = NanoColors::text;
-        if (active && red)   c = juce::Colour (0xff101010);
-        else if (active)     c = NanoColors::accent;
+        if (active)          c = NanoColors::ink;
         else if (b.isColourSpecified (juce::TextButton::textColourOffId))
             c = b.findColour (juce::TextButton::textColourOffId);
         g.setColour (b.isEnabled() ? c : c.withAlpha (0.4f));
-        g.setFont (titleFont (13.0f));
+        g.setFont (titleFont (12.0f));
         g.drawText (b.getButtonText(), 2, 0, b.getWidth() - 4, b.getHeight(),
                     juce::Justification::centred, true);
     }

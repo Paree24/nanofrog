@@ -13,11 +13,14 @@ multi-mode filter (LP24/LP12/BP12/HP12), amp with drive, 2 ADSR envelopes,
 (EG, velocity and mod-wheel sources unipolar, PITCH moves both oscillators),
 and Poly / Mono / Unison voice assign (Single or Multi trigger, Last / Low /
 High note priority, 4-voice unison with detune in cents), feeding a shared
-chain of modulation FX (chorus/flanger/phaser), a tempo-syncable Stereo /
-Cross / Ping-pong delay, 2-band EQ, DC cleanup, an idle gate and a -0.3 dBFS
+chain of drive and tape / tube saturation, modulation FX
+(chorus/flanger/phaser), a tempo-syncable Stereo / Cross / Ping-pong delay,
+a reverb, 2-band EQ, DC cleanup, an idle gate and a -0.3 dBFS
 lookahead limiter, with a tempo-synced arpeggiator on top (Up / Down / Alt1 /
 Alt2 / Random / Trigger, 1/4 ... 1/32 plus 1/6, last step 1-8 with steps
-switchable on and off). Hard sync is band-limited, user waves are
+switchable on and off). Drive, saturation and reverb are extensions beyond
+the classic VA feature set (ported from Pastel Sampler); they default to off, so every
+preset sounds as it did before. Hard sync is band-limited, user waves are
 mipmapped, TRIANGLE Control 1 folds the wave and SINE Control 1 sets the
 cross-mod depth from OSC2. Pitch-bend range is adjustable. A single header
 knob crossfades Timbre 1 ↔ Timbre 2.

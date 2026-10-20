@@ -88,6 +88,7 @@ private:
     std::vector<SegStrip*> strips;
     std::vector<juce::Component*> scopeViews;
     std::vector<juce::Component*> meterViews;
+    juce::Component* driveViews[2] {}; // DRIVE, SATURATION pictures (dimmed while off)
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> sAtt;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> cAtt;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> bAtt;
@@ -100,6 +101,15 @@ private:
     juce::ToggleButton* addToggle (juce::Component* parent, const juce::String& pid,
                                    const juce::String& label, int x, int y, int w, int h = 26);
     juce::GroupComponent* addSection (const juce::String& title, int x, int y, int w, int h);
+    template <typename V, typename... Args>
+    V* addView (juce::Component* parent, juce::Rectangle<int> bounds, Args&&... args)
+    {
+        auto* v = new V (std::forward<Args> (args)...);   // a direct-manipulation view (PastelViews)
+        parent->addAndMakeVisible (v);
+        owned.emplace_back (v);
+        v->setBounds (bounds);
+        return v;
+    }
     SegStrip* addSeg (juce::Component* parent, const juce::String& pid,
                       const juce::StringArray& labels, bool red, int x, int y,
                       int bw, int bh, int cols);
