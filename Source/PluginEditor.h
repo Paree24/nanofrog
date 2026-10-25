@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "NanoLook.h"
 #include "PresetBrowser.h"
+#include "MidiLearn.h"
 
 class NanoFrogProcessor;
 
@@ -54,6 +55,7 @@ private:
     juce::ComboBox presetBox;
     juce::TextButton browseBtn { "BROWSE" };
     juce::TextButton mutateBtn { "MUTATE" };
+    pastel::MidiLearnButton midiBtn;
     juce::TextButton undoBtn { "UNDO" }, redoBtn { "REDO" }, locksBtn { "LOCKS" };
     std::unique_ptr<PresetBrowser> browser;
     juce::TextButton tabT1 { "TIMBRE 1" }, tabT2 { "TIMBRE 2" };

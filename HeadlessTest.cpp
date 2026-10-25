@@ -189,6 +189,10 @@ int main()
         juce::File udir = juce::File::getSpecialLocation (juce::File::tempDirectory)
                               .getChildFile ("nb_usertest");
         udir.deleteRecursively();
+        juce::File learnDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                  .getChildFile ("nb_midilearn");
+        learnDir.deleteRecursively();
+        pastel::MidiLearn::setDirectoryForTest (learnDir); // never the user's ~/.config
 #ifdef _WIN32
         _putenv_s ("NANOFROG_FACTORY_JSON", json.getFullPathName().toRawUTF8());
         _putenv_s ("NANOFROG_USER_DIR", udir.getFullPathName().toRawUTF8());
@@ -211,6 +215,79 @@ int main()
     CHECK (PresetBank::get (1).name == "Init Lead",
            "preset 1 is '%s', expected Init Lead",
            PresetBank::get (1).name.toRawUTF8());
+
+    // ---- MIDI learn: global CC map + preset knob (scratch file, not ~/.config) ----
+    {
+        using Enc = pastel::MidiLearn::Enc;
+        auto ok = [&] (bool c, const char* m) { CHECK (c, "midi learn: %s", m); if (c) printf ("midi learn ok: %s\n", m); };
+        auto det = [] (std::vector<int> v) { return pastel::MidiLearn::detectEncoding (v); };
+        ok (det ({ 65, 65, 65, 65 }) == Enc::offset64 && det ({ 63, 62, 63 }) == Enc::offset64, "offset-64 (64+n) encoder detected");
+        ok (det ({ 1, 1, 2, 1 }) == Enc::twos && det ({ 127, 127, 126 }) == Enc::twos, "two's complement encoder detected");
+        ok (det ({ 60, 61, 62, 63 }) == Enc::absolute && det ({ 0, 1, 2, 3 }) == Enc::absolute
+                && det ({ 127, 126, 125, 124 }) == Enc::absolute, "turned absolute knob stays absolute");
+
+        auto cc = [] (int num, int val) { juce::MidiBuffer m; m.addEvent (juce::MidiMessage::controllerEvent (1, num, val), 0); return m; };
+        auto a = std::make_unique<NanoFrogProcessor>();
+        auto& ml = a->midiLearn;
+        ml.clearAll();
+        auto* cut = a->apvts.getParameter ("filter_cutoff");
+        cut->setValueNotifyingHost (0.5f); // defaults fully open: leave room to turn up
+        ml.setLearning (true);
+        cut->beginChangeGesture(); cut->endChangeGesture(); // touching the knob on screen arms it
+        ok (ml.getArmedName() == cut->getName (40), "touching a control arms it");
+        const float before = cut->getValue();
+        for (int i = 0; i < 4; ++i) ml.process (cc (74, 65));
+        ok (std::abs (cut->getValue() - before) < 1e-6f, "learning CCs never move the armed control");
+        ml.tick();
+        auto maps = ml.getMappings();
+        ok (maps.size() == 1 && maps[0].cc == 74 && maps[0].paramId == "filter_cutoff" && maps[0].enc == Enc::offset64,
+            "CC 74 learned as a relative knob on the filter cutoff");
+        ml.setLearning (false);
+        ml.process (cc (74, 66));
+        const float up = cut->getValue();
+        ml.process (cc (74, 62));
+        ok (up > before && cut->getValue() < up, "endless knob turns cutoff the right way both directions");
+
+        auto b = std::make_unique<NanoFrogProcessor>(); // another project / instance
+        auto* cutB = b->apvts.getParameter ("filter_cutoff");
+        cutB->setValueNotifyingHost (0.5f);
+        b->midiLearn.process (cc (74, 70));
+        ok (b->midiLearn.getMappings().size() == 1 && cutB->getValue() > 0.5f, "mapping is global: a new instance has it");
+
+        ml.setLearning (true);
+        cut->beginChangeGesture(); cut->endChangeGesture();
+        for (int v : { 10, 11, 12, 13 }) ml.process (cc (21, v));
+        ml.tick();
+        maps = ml.getMappings();
+        ok (maps.size() == 1 && maps[0].cc == 21 && maps[0].enc == Enc::absolute, "re-learning moves the control to the new knob");
+        ml.setLearning (false);
+        ml.process (cc (21, 127));
+        ok (std::abs (cut->getValue() - 1.0f) < 1e-6f, "absolute knob sets the value directly");
+
+        int stepped = 0;
+        ml.onPresetStep = [&] (int d) { stepped += d; };
+        ml.armPresetKnob();
+        ml.process (cc (114, 1));
+        for (int i = 0; i < 10; ++i) ml.tick();
+        ok (ml.getPresetKnobCC() == 114, "preset knob learned from one nudge");
+        ml.process (cc (114, 1)); ml.process (cc (114, 3));
+        ml.tick();
+        ml.process (cc (114, 127));
+        ml.tick();
+        ok (stepped == 1, "preset knob: two steps forward, one back");
+        ml.onPresetStep = nullptr;
+
+        auto c = std::make_unique<NanoFrogProcessor>();
+        const int n = c->getNumPrograms(), prog = c->getCurrentProgram();
+        c->midiLearn.process (cc (114, 1));
+        c->midiLearn.tick();
+        ok (c->getCurrentProgram() == ((prog + 1) % n + n) % n, "preset knob loads the next program in a new instance");
+        c->midiLearn.process (cc (114, 127)); c->midiLearn.process (cc (114, 127));
+        c->midiLearn.tick();
+        ok (c->getCurrentProgram() == ((prog - 1) % n + n) % n, "preset knob steps back and wraps like the < button");
+        ml.clearAll();
+        ok (ml.getMappings().empty() && ml.getPresetKnobCC() < 0, "clear all");
+    }
 
     // ---- editor layout ----
     NanoFrogEditor* outer = dynamic_cast<NanoFrogEditor*> (proc->createEditor());

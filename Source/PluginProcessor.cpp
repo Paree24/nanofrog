@@ -40,6 +40,12 @@ NanoFrogProcessor::NanoFrogProcessor()
             currentPreset = t.getProperty ("preset", currentPreset);
             currentUser = t.getProperty ("user", "").toString();
         });
+    // preset knob: same wrap as the editor's < > buttons
+    midiLearn.onPresetStep = [this] (int delta)
+    {
+        const int n = getNumPrograms();
+        setCurrentProgram (((getCurrentProgram() + delta) % n + n) % n);
+    };
 }
 
 NanoFrogProcessor::~NanoFrogProcessor() {}
@@ -698,6 +704,7 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 {
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
+    midiLearn.process (midi); // learned CCs land before this block renders
     bool haveHostBpm = false;
     if (auto* ph = getPlayHead())
     {

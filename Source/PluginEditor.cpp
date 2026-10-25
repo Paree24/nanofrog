@@ -210,7 +210,7 @@ struct MeterView : juce::Component
 
 // ================= editor content (fixed layout, scaled by host) =================
 FrogContent::FrogContent (NanoFrogProcessor& p)
-    : proc (p)
+    : proc (p), midiBtn (p.midiLearn)
 {
     setLookAndFeel (&look);
     pastel::Theme::format = fmtVal;   // the views' readouts read like the knobs
@@ -257,6 +257,8 @@ FrogContent::FrogContent (NanoFrogProcessor& p)
     addAndMakeVisible (mutateBtn);
     mutateBtn.setTooltip ("Slightly re-rolls the sound (envelopes frozen for bass/keys/leads/percussive)");
     mutateBtn.onClick = [&] { proc.mutateCurrentPatch(); };
+    addAndMakeVisible (midiBtn); // learning = toggled, which NanoLook fills with the accent
+    midiBtn.setColour (juce::TextButton::buttonOnColourId, NanoColors::accent);
     // Browser overlay last: paints above everything while open.
     browser = std::make_unique<PresetBrowser> (proc);
     browser->setVisible (false);
@@ -1140,6 +1142,7 @@ void FrogContent::resized()
     presetBox.setBounds (230, 11, 236, 24);
     browseBtn.setBounds (472, 11, 72, 24);
     mutateBtn.setBounds (550, 11, 80, 24);
+    midiBtn.setBounds (636, 11, 62, 24);
 }
 
 void FrogContent::timerCallback()

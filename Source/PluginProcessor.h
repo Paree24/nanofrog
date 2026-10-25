@@ -7,6 +7,7 @@
 #include "SnapshotUndo.h"
 
 #include "PresetBank.h"
+#include "MidiLearn.h"
 
 // Factory presets live in FactoryBank/NanoFrogFactory.json (data, not code);
 // user presets are single JSON files in the user dir. See PresetBank.h.
@@ -80,6 +81,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    pastel::MidiLearn midiLearn { *this, "NanoFrog" }; // global CC map + preset knob
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     // for UI meters

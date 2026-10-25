@@ -42,6 +42,7 @@ target_sources(NanoFrog PRIVATE
     Source/PastelViews.cpp
     Source/PresetBank.cpp
     Source/PresetBrowser.cpp
+    Source/MidiLearn.cpp
 )
 
 target_include_directories(NanoFrog PRIVATE Source)
@@ -92,6 +93,7 @@ target_sources(NanoFrogHeadlessTest PRIVATE
     Source/PastelViews.cpp
     Source/PresetBank.cpp
     Source/PresetBrowser.cpp
+    Source/MidiLearn.cpp
 )
 
 target_include_directories(NanoFrogHeadlessTest PRIVATE Source)
