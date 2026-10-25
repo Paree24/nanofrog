@@ -116,8 +116,10 @@ private:
     VoiceParams collectVoiceParams (int timbre);
     void handleMidi (const juce::MidiMessage& m);
     int allocateVoice (int timbre, int note, int poly);
-    void arpTick();          // per-sample arp clock (sample-accurate steps)
+    void arpTick (int i);    // per-sample arp clock (sample-accurate steps)
     void arpFireStep();
+    struct ArpSlot { long long slot; double into; }; // into: steps past the slot start
+    ArpSlot arpSlotAt (double beat) const;
     void releaseArpNote();
     float egTimeFromKnob (float v01, float maxSec);
 
@@ -150,6 +152,12 @@ private:
         int currentNote = -1;
         int stepPos = 0;   // position in the LAST STEP cycle (0..7)
         long tick = 0;     // every step, played or rest (swing parity)
+        // host sync: while the transport plays, steps are slots counted in
+        // host beats from the phrase's first key (anchor), not a free countdown
+        bool grid = false, wasGrid = false;
+        double ppq0 = 0.0, endBeat = 0.0, beatsPerSample = 0.0, stepBeats = 0.25, swing = 0.0;
+        double anchor = 0.0, expectPpq = 0.0;
+        long long slot = 0; int slotRate = -1;
     } arp;
     std::vector<int> heldNotes; // raw held (before arp)
     // Per-block snapshot used by MIDI handling and rendering (no per-event

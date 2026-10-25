@@ -635,7 +635,17 @@ void NanoFrogProcessor::arpFireStep()
     arpOffCountdown = len * (double) juce::jlimit (0.05f, 1.0f, pv (apvts, "arp_gate"));
 }
 
-void NanoFrogProcessor::arpTick()
+// grid position -> swung slot (pairs: even step long, odd short, as free-run)
+NanoFrogProcessor::ArpSlot NanoFrogProcessor::arpSlotAt (double beat) const
+{
+    const double x = (beat - arp.anchor) / arp.stepBeats + 1.0e-7; // a note stamped on the beat lands on its step
+    const double pair = std::floor (x * 0.5), ph = x - 2.0 * pair;
+    const double split = 1.0 + 0.5 * arp.swing;
+    const bool odd = ph >= split;
+    return { (long long) pair * 2 + (odd ? 1 : 0), odd ? ph - split : ph };
+}
+
+void NanoFrogProcessor::arpTick (int i)
 {
     const auto& src = blockLatch ? arp.held : heldNotes;
     if (! blockArpOn || src.empty())
@@ -654,11 +664,31 @@ void NanoFrogProcessor::arpTick()
         arp.running = true;
         arp.step = 0; arp.stepPos = 0; arp.tick = 0;
         arp.samplesToNext = 0.0;
+        if (arp.grid)
+        {
+            // transport playing: step 0 sounds on the key, the rest follow in
+            // host beats from it (dotted rates start where the phrase does)
+            arp.anchor = arp.ppq0 + i * arp.beatsPerSample;
+            arp.slot = 0;
+            arpFireStep();
+            return;
+        }
     }
     if (arpOffCountdown > 0.0)
     {
         arpOffCountdown -= 1.0;
         if (arpOffCountdown <= 0.0) releaseArpNote();
+    }
+    if (arp.grid)
+    {
+        const auto a = arpSlotAt (arp.ppq0 + i * arp.beatsPerSample);
+        if (a.slot != arp.slot)
+        {
+            arp.slot = a.slot;
+            arp.tick = a.slot; // swing parity follows the grid
+            arpFireStep();
+        }
+        return;
     }
     arp.samplesToNext -= 1.0;
     if (arp.samplesToNext <= 0.0) arpFireStep();
@@ -717,6 +747,47 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
     prevArpOn = blockArpOn;
 
+    // arp clock: the host grid while the transport plays (locked through
+    // tempo changes, loops and seeks), else a free countdown from the first key
+    {
+        static const double beats[7] = { 1.0, 0.5, 0.25, 1.0/3.0, 1.0/6.0, 0.125, 2.0/3.0 }; // = arpFireStep
+        const int ri = juce::jlimit (0, 6, (int) pv (apvts, "arp_rate"));
+        arp.grid = false;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+                if (pos->getIsPlaying() && pos->getBpm())
+                    if (auto q = pos->getPpqPosition()) { arp.grid = true; arp.ppq0 = *q; }
+        arp.grid = arp.grid && blockArpOn;
+        arp.stepBeats = beats[ri];
+        arp.swing = juce::jlimit (-1.0f, 1.0f, pv (apvts, "arp_swing"));
+        arp.beatsPerSample = juce::jmax (20.0, effBpm) / 60.0 / fs;
+        if (arp.grid && (! arp.wasGrid || std::abs (arp.ppq0 - arp.expectPpq) > 1.0e-3))
+        {
+            // transport started or a loop / seek jump: the pattern restarts here
+            arp.anchor = arp.ppq0;
+            arp.slot = -1;
+            arp.step = 0; arp.stepPos = 0;
+            arp.slotRate = ri;
+        }
+        else if (arp.grid && arp.slotRate != ri)
+        {
+            // rate changed (slots renumbered): rejoin without an extra step
+            const auto a = arpSlotAt (arp.ppq0);
+            arp.slot = a.into < 1.0e-4 ? a.slot - 1 : a.slot;
+            arp.slotRate = ri;
+        }
+        if (! arp.grid && arp.wasGrid && arp.running)
+        {
+            // transport stopped mid-pattern: free-run on from where the grid was
+            const auto a = arpSlotAt (arp.endBeat);
+            const double len = 1.0 + ((a.slot & 1) == 0 ? 0.5 : -0.5) * arp.swing;
+            arp.samplesToNext = juce::jmax (1.0, (len - a.into) * arp.stepBeats / arp.beatsPerSample);
+            arp.tick = a.slot + 1;
+        }
+        if (arp.grid) arp.endBeat = arp.expectPpq = arp.ppq0 + n * arp.beatsPerSample;
+        arp.wasGrid = arp.grid;
+    }
+
     // Per-block constants (hoisted out of the sample loop).
     float mix = juce::jlimit (0.0f, 1.0f, pv (apvts, "tmix"));
     const float t1 = std::cos (mix * 1.5707963f), t2 = std::sin (mix * 1.5707963f);
@@ -735,7 +806,7 @@ void NanoFrogProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         for (; midiIt != midiEnd && (*midiIt).samplePosition <= i; ++midiIt)
             handleMidi ((*midiIt).getMessage());
-        arpTick();
+        arpTick (i);
         bendSm += (bendSemi - bendSm) * wk;
         modSm += (modWheel - modSm) * wk;
 

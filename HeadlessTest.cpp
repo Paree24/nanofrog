@@ -798,6 +798,67 @@ int main()
         printf ("arp latch/swing/timing: ok (%d / %d onsets)\n", (int) o2.size(), (int) o3.size());
     }
 
+    // ---- host-synced arp: with the transport playing (from mid-beat), steps
+    //      count from the key in host beats, swung pairs too ----
+    {
+        struct FakePlayHead : juce::AudioPlayHead
+        {
+            double ppq = 0.0;
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                PositionInfo p; p.setBpm (120.0); p.setPpqPosition (ppq); p.setIsPlaying (true);
+                return p;
+            }
+        };
+        for (float swing : { 0.0f, 0.6f })
+        {
+            auto px = std::make_unique<NanoFrogProcessor>();
+            px->prepareToPlay (44100.0, 512);
+            auto setP = [&] (const char* id, float v)
+            {
+                if (auto* p = px->apvts.getParameter (id))
+                    p->setValueNotifyingHost (p->convertTo0to1 (v));
+            };
+            setP ("arp_on", 1.0f); setP ("arp_rate", 2.0f); setP ("arp_gate", 0.3f);
+            setP ("arp_swing", swing); setP ("env2_r", 0.0f);
+            FakePlayHead ph; ph.ppq = 0.4; // 8820 samples before beat 1
+            px->setPlayHead (&ph);
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::MidiBuffer on, none;
+            on.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+            std::vector<int> o; bool prevLoud = false; long t = 0; float env = 0.0f;
+            for (int b = 0; b < 120; ++b)
+            {
+                px->processBlock (buf, b == 0 ? on : none);
+                ph.ppq += 512.0 * 2.0 / 44100.0;
+                for (int i = 0; i < 512; ++i, ++t)
+                {
+                    env = std::max (std::abs (buf.getSample (0, i)), env * 0.995f);
+                    bool loud = prevLoud ? env > 2e-3f : env > 2e-2f;
+                    if (loud && ! prevLoud) o.push_back ((int) t);
+                    prevLoud = loud;
+                }
+            }
+            px->setPlayHead (nullptr);
+            // steps count from the key (sample 0): step k at k*5512.5 samples,
+            // odd steps swung late by 0.5*swing of a step
+            int bad = 0;
+            for (int x : o)
+            {
+                double best = 1e9;
+                for (int k = 0; k < 40; ++k)
+                {
+                    const double at = (k + ((k & 1) ? 0.5 * swing : 0.0)) * 5512.5;
+                    if (std::abs (x - at - 100.0) < std::abs (best)) best = x - at - 100.0;
+                }
+                if (std::abs (best) > 150.0) ++bad;
+            }
+            CHECK (o.size() > 8 && bad == 0, "synced arp (swing %.1f): %d of %d onsets off the host grid", swing, bad, (int) o.size());
+            CHECK (! o.empty() && o[0] < 300, "synced arp's first step not on the key (onset %d)", o.empty() ? -1 : o[0]);
+            printf ("synced arp (swing %.1f): ok (%d onsets, first %d)\n", swing, (int) o.size(), o.empty() ? -1 : o[0]);
+        }
+    }
+
     // ---- short note inside a voice-steal fade must not hang ----
     {
         auto px = std::make_unique<NanoFrogProcessor>();
