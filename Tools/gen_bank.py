@@ -377,691 +377,820 @@ class Patch:
 # not rolled: lists of musically sensible settings indexed by v, with a
 # little seeded jitter on top so neighbours never sound identical.
 
-def pick(seq, v):
-    return seq[v % len(seq)]
+
+# ================================================================ design system
+# A sound type ("archetype": reese, supersaw pad, mallet...) is a CORE that
+# fixes what makes it that sound (register, envelope shape, voice mode), plus
+# AXES of designed options: oscillator source, filter, second-timbre layer,
+# movement and effects. A preset is one option per axis. Every option is a
+# musically sensible setting; variety comes from combining them, not from
+# random knob noise. Tools/diversify.py renders several candidate
+# combinations per slot and keeps the one that sounds least like its
+# siblings (Tools/bank_choice.json); gen_bank.py applies that choice.
+
+FAM_WORD = {"analog": "Vintage", "reed": "Reedy", "bell": "Bell", "metal": "Metal",
+            "vocal": "Vocal", "bright": "Bright", "wood": "Wooden", "detune": "Chorused"}
 
 
-def j(rng, x, amt):
-    return x + rng.uniform(-amt, amt)
+class Opt:
+    """One designed option on an axis: a name word (or None), tags, and the change."""
+
+    def __init__(self, word, fn, tags=()):
+        self.word, self.fn, self.tags = word, fn, list(tags)
 
 
-# ============================== BASS
-def b_808(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.0, 0.12, 0.18], v), legato=v % 4 >= 2)
+# ---------------------------------------------------------------- sources
+# fn(p, o, r): o = the archetype's base octave, r = seeded RNG for small jitter
+def src_saws(det=(6, 12)):
+    def f(p, o, r):
+        d = r.uniform(*det)
+        p.o1(W_SAW, octave=o, fine=-d, level=0.7).o2(W_SAW, octave=o, fine=d, level=0.65)
+    return Opt(None, f, ["Saw"])
+
+
+def src_saw_pulse():
+    def f(p, o, r):
+        p.o1(W_SAW, octave=o, fine=-r.uniform(4, 9), level=0.7)
+        p.o2(W_SQR, octave=o, fine=r.uniform(4, 9), shape=r.uniform(0.15, 0.45), level=0.6)
+    return Opt("Pulse", f, ["Pulse"])
+
+
+def src_squares():
+    def f(p, o, r):
+        d = r.uniform(5, 11)
+        p.o1(W_SQR, octave=o, fine=-d, shape=r.uniform(0.0, 0.3), level=0.7)
+        p.o2(W_SQR, octave=o, fine=d, shape=r.uniform(0.3, 0.6), level=0.6)
+    return Opt("Square", f, ["Square"])
+
+
+def src_pwm():
+    def f(p, o, r):
+        p.o1(W_SQR, octave=o, shape=0.2, pwm=r.uniform(0.35, 0.6), level=0.7)
+        p.o2(W_SAW, octave=o, fine=r.uniform(5, 10), level=0.5)
+        if p.t1["lfo1_depth"] == 0.0:
+            p.lfo1(L_TRI, hz=r.uniform(0.4, 1.2), depth=1.0, key=0)
+    return Opt("PWM", f, ["PWM"])
+
+
+def src_digital(fam, partner=W_SAW):
+    def f(p, o, r):
+        p.o1(W_DIG, octave=o, digital=dig(fam, r.randrange(8), r.randrange(2)), fine=-r.uniform(4, 9), level=0.75)
+        p.o2(partner, octave=o, fine=r.uniform(4, 9), level=0.55)
+    return Opt(FAM_WORD[fam], f, ["Digital", FAM_WORD[fam]])
+
+
+def src_hybrid():
+    def f(p, o, r):
+        fa, fb = r.sample(list(FAM), 2)
+        p.o1(W_DIG, octave=o, digital=dig(fa, r.randrange(8)), fine=-r.uniform(5, 10), level=0.7)
+        p.o2(W_DIG, octave=o, digital=dig(fb, r.randrange(8), 1), fine=r.uniform(5, 10), level=0.6)
+    return Opt("Hybrid", f, ["Digital"])
+
+
+def src_sync(sweep=(0.25, 0.5)):
+    def f(p, o, r):
+        p.o1(W_SAW, octave=o, level=0.35).o2(W_SAW, octave=o, pitch=r.choice([7, 12, 12, 5]), level=0.75)
+        p.t1["osc_mod"] = 2
+        p.mod(2, S_ENV1, D_O2PITCH, r.uniform(*sweep))
+    return Opt("Sync", f, ["Sync"])
+
+
+def src_fm(amt=(0.12, 0.3)):
+    def f(p, o, r):
+        p.o1(r.choice([W_SAW, W_SIN, W_SQR]), octave=o, level=0.75)
+        p.o2(W_SIN, octave=o + r.choice([0, 1]), level=0.0)
+        p.t1["osc2_level"] = 1.0
+        p.t1["fm_amt"] = r.uniform(*amt)
+    return Opt("FM", f, ["FM"])
+
+
+def src_ring():
+    def f(p, o, r):
+        p.o1(W_SAW, octave=o, level=0.6).o2(r.choice([W_SQR, W_SAW]), octave=o + 1, level=0.55)
+        p.t1["osc_mod"] = 1
+    return Opt("Ring", f, ["Ring"])
+
+
+def src_sine_tri():
+    def f(p, o, r):
+        p.o1(r.choice([W_SIN, W_TRI]), octave=o, level=0.85).o2(W_SIN, octave=o + 1, level=r.uniform(0.1, 0.3))
+    return Opt("Round", f, ["Round"])
+
+
+# ---------------------------------------------------------------- filters
+def flt(word, kind, hz, reso, env=0.0, dec=0.3, sus=0.0, key=0.5):
+    def f(p, o, r):
+        p.filt(hz * r.uniform(0.85, 1.15), reso, kind=kind, key=key)
+        if env:
+            p.fenv(0.0, dec, sus, dec, amt=env)
+    return Opt(word, f, [])
+
+
+# ---------------------------------------------------------------- layers (timbre 2)
+def lay_none():
+    return Opt(None, lambda p, o, r: None)
+
+
+def lay_wide():
+    return Opt("Wide", lambda p, o, r: p.wide(r.uniform(6, 11), r.uniform(0.3, 0.5)), ["Wide"])
+
+
+def lay_octave(up=True):
+    def f(p, o, r):
+        d = 1 if up else -1
+        p.layer(r.uniform(0.4, 0.55), osc1_octave=p.t1["osc1_octave"] + d, osc2_octave=p.t1["osc2_octave"] + d,
+                osc1_wave=r.choice([W_SQR, W_SAW, W_DIG]), osc1_digital=dig(r.choice(list(FAM)), r.randrange(8)),
+                amp_pan=r.uniform(-0.3, 0.3))
+    return Opt("Octave" if up else "Deep", f, ["Layer"])
+
+
+def lay_fifth():
+    def f(p, o, r):
+        if p.t1["osc_mod"] % 2 == 1 or p.t1["fm_amt"] > 0.0:
+            p.wide(r.uniform(6, 10), 0.35)   # a fifth on ring / FM would be inharmonic: double instead
+            return
+        p.layer(r.uniform(0.4, 0.5), osc1_pitch=7, osc2_pitch=7, amp_pan=r.choice([-0.25, 0.25]))
+    return Opt("Fifth", f, ["Layer", "Fifth"])
+
+
+def lay_sub():
+    def f(p, o, r):
+        p.layer(r.uniform(0.4, 0.5), osc1_wave=W_SIN, osc1_octave=p.t1["osc1_octave"] - 1, mix_o2=0.0,
+                osc2_level=0.0, filter_cutoff=cut(400), filter_reso=0.0, mod1_amt=0.0, amp_pan=0.0)
+    return Opt(None, f, ["Layer", "Sub"])
+
+
+def lay_texture():
+    def f(p, o, r):
+        fam = r.choice(["metal", "bell", "bright", "vocal", "wood"])
+        p.layer(r.uniform(0.35, 0.5), osc1_wave=W_DIG, osc1_digital=dig(fam, r.randrange(8), 1),
+                filter_type=F_HP12, filter_cutoff=cut(r.uniform(500, 1200)), amp_pan=r.choice([-0.35, 0.35]))
+    return Opt("Textured", f, ["Layer", "Texture"])
+
+
+def lay_split():
+    def f(p, o, r):
+        p.layer(r.uniform(0.4, 0.5), filter_type=F_BP12, filter_cutoff=cut(r.uniform(900, 2500)),
+                filter_reso=r.uniform(0.3, 0.5), amp_pan=r.choice([-0.4, 0.4]))
+    return Opt("Split", f, ["Layer"])
+
+
+# ---------------------------------------------------------------- movement (LFO1 / LFO2)
+def mv_still():
+    return Opt(None, lambda p, o, r: None)
+
+
+def mv_drift(amt=(0.08, 0.18)):
+    def f(p, o, r):
+        p.lfo1(r.choice([L_TRI, L_SIN]), hz=r.uniform(0.08, 0.3), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, r.uniform(*amt))
+    return Opt("Drifting", f, ["Moving"])
+
+
+def mv_synced(divs=("1/4", "1/8", "1/16", "1/12", "3/16"), amt=(0.3, 0.6)):
+    def f(p, o, r):
+        p.lfo1(r.choice([L_SIN, L_TRI, L_SQR, L_SAW]), sync=r.choice(divs), depth=1.0, key=1)
+        p.mod(1, S_LFO1, D_CUT, r.uniform(*amt))
+    return Opt("Pulsing", f, ["Synced", "Moving"])
+
+
+def mv_steps(amt=(0.2, 0.35)):
+    def f(p, o, r):
+        p.lfo1(L_RND, sync=r.choice(["1/16", "1/8"]), depth=1.0, key=1).mod(1, S_LFO1, D_CUT, r.uniform(*amt))
+    return Opt("Stepping", f, ["Synced", "Moving"])
+
+
+def mv_morph():
+    def f(p, o, r):
+        p.lfo1(L_TRI, hz=r.uniform(0.2, 0.8), depth=1.0, key=0).mod(1, S_LFO1, D_O1SHAPE, r.uniform(0.4, 0.8))
+    return Opt("Morphing", f, ["Moving"])
+
+
+def mv_pan():
+    def f(p, o, r):
+        p.lfo2(L_SIN, hz=r.uniform(0.3, 1.5), depth=1.0, key=0).mod(3, S_LFO2, D_PAN, r.uniform(0.5, 0.9))
+    return Opt("Panning", f, ["Moving"])
+
+
+def mv_wheel():
+    def f(p, o, r):
+        p.mod(4, S_WHEEL, D_CUT, r.uniform(0.3, 0.5))
+    return Opt(None, f, [])
+
+
+# ---------------------------------------------------------------- effects
+def fx_dry():
+    return Opt(None, lambda p, o, r: None)
+
+
+def fx_chorus():
+    return Opt(None, lambda p, o, r: p.chorus(r.uniform(0.2, 0.35), r.uniform(0.3, 0.5), r.uniform(0.15, 0.35)), ["Chorus"])
+
+
+def fx_phaser():
+    return Opt("Phased", lambda p, o, r: p.chorus(r.uniform(0.3, 0.5), r.uniform(0.4, 0.7), r.uniform(0.08, 0.25), kind=3), ["Phaser"])
+
+
+def fx_flanger():
+    return Opt("Flanged", lambda p, o, r: p.chorus(r.uniform(0.3, 0.45), r.uniform(0.4, 0.7), r.uniform(0.05, 0.2), kind=2), ["Flanger"])
+
+
+def fx_drive():
+    return Opt("Dirty", lambda p, o, r: p.drive(r.uniform(0.3, 0.55), r.uniform(0.35, 0.6)), ["Distorted"])
+
+
+def fx_tape():
+    return Opt("Tape", lambda p, o, r: p.sat(r.uniform(0.3, 0.5), r.uniform(0.4, 0.6)), ["Saturated"])
+
+
+def fx_tube():
+    return Opt("Warm", lambda p, o, r: p.sat(r.uniform(0.3, 0.5), r.uniform(0.45, 0.65), tube=True), ["Saturated"])
+
+
+def fx_delay():
+    def f(p, o, r):
+        p.delay(r.choice(["3/16", "1/8", "1/4", "3/8"]), r.uniform(0.25, 0.45), r.uniform(0.12, 0.22), kind=r.choice([0, 1, 2]))
+    return Opt("Echo", f, ["Delay"])
+
+
+def fx_space():
+    def f(p, o, r):
+        p.verb(r.uniform(0.25, 0.4), r.uniform(0.6, 0.9), r.uniform(0.3, 0.6))
+        p.delay(r.choice(["1/4", "3/8"]), r.uniform(0.3, 0.45), r.uniform(0.1, 0.18))
+    return Opt("Vast", f, ["Space"])
+
+
+def fx_room():
+    return Opt(None, lambda p, o, r: p.verb(r.uniform(0.12, 0.22), r.uniform(0.35, 0.55)), ["Reverb"])
+
+
+def fx_chorus_delay():
+    def f(p, o, r):
+        p.chorus(r.uniform(0.2, 0.3), r.uniform(0.3, 0.45), r.uniform(0.2, 0.35))
+        p.delay(r.choice(["3/16", "1/8"]), r.uniform(0.25, 0.4), r.uniform(0.12, 0.2))
+    return Opt(None, f, ["Chorus", "Delay"])
+
+
+def fx_phase_drive():
+    def f(p, o, r):
+        p.chorus(r.uniform(0.3, 0.45), r.uniform(0.4, 0.6), r.uniform(0.08, 0.2), kind=3)
+        p.drive(r.uniform(0.3, 0.45), r.uniform(0.35, 0.5))
+    return Opt("Phased", f, ["Phaser", "Distorted"])
+
+
+# ---------------------------------------------------------------- archetypes
+class Arch:
+    def __init__(self, cat, noun, count, tags, core, axes, first=None, words=None, boost=1.0):
+        self.cat, self.noun, self.count, self.tags, self.boost = cat, noun, count, tags, boost
+        self.core, self.axes, self.first = core, axes, first
+        self.words = words or ["source", "layer", "motion", "fx", "filter"]
+
+
+def core_bass(mono=True, glide=0.0, legato=True):
+    def f(p, r):
+        if mono:
+            p.mono(glide=glide, legato=legato)
+        p.amp(0.002, 0.4, 1.0, 0.12, vel=0.15)
+    return f
+
+
+def core_808(p, r):
+    p.mono(glide=r.choice([0.0, 0.0, 0.12]), legato=True)
     p.o1(W_SIN, octave=-1, level=0.95).filt(2400, key=0.0)
-    p.amp(0.0, pick([0.8, 1.1, 0.6, 1.5, 0.9], v), 0.0, pick([0.15, 0.25, 0.12], v), vel=0.15)
-    if v == 0:
-        return p, ["808", "Sub"]                       # clean: pure sine, nothing else
-    p.fenv(0.0, 0.06, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, pick([0.12, 0.08, 0.16, 0.1], v))
-    if v % 3 == 1:
-        p.sat(pick([0.35, 0.5, 0.25], v), 0.45)
-    if v % 3 == 2:
-        p.o1(W_TRI, octave=-1, level=0.95).drive(0.25, 0.35)
-    tags = ["808", "Sub"] + (["Glide"] if v % 4 >= 2 else [])
-    return p, tags
+    p.amp(0.0, r.choice([0.6, 0.8, 1.1, 1.5]), 0.0, r.choice([0.12, 0.2]), vel=0.15)
 
 
-def b_sub(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.08], v), legato=True)
-    p.o1(pick([W_SIN, W_TRI, W_SIN, W_SQR], v), octave=-1, level=0.9)
-    p.o2(W_SIN, octave=-1, level=0.0)
-    if v % 4 == 3:
-        p.filt(220, 0.0)
-    else:
-        p.filt(900, 0.0, key=0.0)
-    p.amp(0.004, 0.2, 1.0, 0.12, vel=0.1)
-    if v % 2:
-        p.o2(W_SQR, octave=0, level=0.18)              # a little edge an octave up
-        p.filt(pick([500, 650, 420], v), 0.05)
-    return p, ["Sub"]
+def src_808_click():
+    def f(p, o, r):
+        p.fenv(0.0, 0.06, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, r.uniform(0.06, 0.16))
+    return Opt("Punch", f, [])
 
 
-def b_reese(v, rng):
-    det = pick([12.0, 18.0, 9.0, 24.0, 15.0], v)
-    p = Patch().mono(glide=pick([0.0, 0.1], v), legato=True)
-    p.o1(W_SAW, octave=-1, fine=-det, level=0.75).o2(W_SAW, octave=-1, fine=det, level=0.75)
-    p.filt(pick([700, 900, 550, 1200, 800], v), pick([0.12, 0.2, 0.08], v))
-    p.fenv(0.0, 0.4, 0.6, 0.2, amt=0.12).amp(0.003, 0.3, 1.0, 0.15, vel=0.1)
-    p.lfo1(L_TRI, hz=pick([0.15, 0.3, 0.22], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, pick([0.12, 0.18, 0.08], v))
-    if v % 2:
-        p.chorus(0.25, 0.3, 0.12, kind=pick([3, 2], v // 2))   # phaser / flanger movement
-    if v % 3 == 0:
-        p.drive(pick([0.3, 0.45], v), 0.4)
-    p.eq(low=1.5)
-    return p, ["Reese"]
+def src_808_tri():
+    def f(p, o, r):
+        p.o1(W_TRI, octave=-1, level=0.95)
+        p.fenv(0.0, 0.05, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, r.uniform(0.05, 0.1))
+    return Opt("Knock", f, [])
 
 
-def b_growl(v, rng):
-    div = pick(["1/8", "1/16", "1/8", "1/4", "1/12"], v)
-    p = Patch().mono(glide=0.05, legato=True)
-    if v % 2 == 0:
-        p.o1(W_SAW, octave=-1, level=0.7).o2(W_SQR, octave=-1, fine=7, level=0.6, shape=0.3)
-        p.t1["fm_amt"] = pick([0.25, 0.35, 0.2], v)
-    else:
-        p.o1(W_DIG, octave=-1, digital=dig(pick(["metal", "vocal", "bright"], v), v), level=0.8)
-        p.o2(W_SAW, octave=-1, fine=-6, level=0.5)
-    p.filt(pick([900, 1200, 700], v), pick([0.35, 0.45, 0.3], v), kind=pick([F_LP24, F_BP12, F_LP12], v))
-    p.lfo1(pick([L_SIN, L_TRI, L_SAW], v), sync=div, depth=1.0, key=1)
-    p.mod(1, S_LFO1, D_CUT, pick([0.55, 0.45, 0.65], v)).mod(3, S_LFO1, D_O1SHAPE, 0.5)
-    p.amp(0.002, 0.3, 1.0, 0.12, vel=0.1).drive(pick([0.45, 0.55, 0.4], v), 0.6).eq(low=2.0, high=1.5)
-    p.sh["song_tempo"] = pick([140.0, 150.0, 174.0], v)
-    return p, ["Growl", "Distorted"]
+def src_808_square():
+    def f(p, o, r):
+        p.o2(W_SQR, octave=-1, level=0.18).filt(r.uniform(500, 900), 0.1, key=0.0)
+    return Opt("Edge", f, [])
 
 
-def b_wobble(v, rng):
-    div = pick(["1/4", "1/8", "1/8", "1/6", "3/8", "1/16"], v)
-    p = Patch().mono(glide=0.06, legato=True)
-    p.o1(W_SAW, octave=-1, level=0.7).o2(pick([W_SQR, W_SAW], v), octave=-1, fine=pick([5, -8], v), level=0.6)
-    p.filt(pick([180, 220, 150], v), pick([0.35, 0.45, 0.4], v), key=0.3)
-    p.lfo1(pick([L_SIN, L_TRI, L_SIN, L_SQR], v), sync=div, depth=1.0, key=1)
-    p.mod(1, S_LFO1, D_CUT, pick([0.75, 0.65, 0.8], v)).mod(4, S_WHEEL, D_L1RATE, 0.5)
-    p.amp(0.002, 0.3, 1.0, 0.15, vel=0.1).drive(pick([0.3, 0.4], v), 0.45).eq(low=2.0)
-    p.sh["song_tempo"] = pick([140.0, 150.0, 128.0], v)
-    return p, ["Wobble"]
+def src_808_pure():
+    return Opt(None, lambda p, o, r: None)
 
 
-def b_pluck(v, rng):
-    p = Patch().mono(t2=False) if v % 3 else Patch()
-    p.o1(pick([W_SAW, W_SQR, W_SAW], v), octave=-1, shape=pick([0.0, 0.3], v), level=0.8)
-    p.o2(pick([W_SQR, W_SAW, W_SIN], v), octave=pick([-1, -2], v), fine=pick([4, -5, 0], v), level=0.5)
-    p.filt(pick([180, 240, 300, 150], v), pick([0.2, 0.3, 0.12], v))
-    p.fenv(0.0, pick([0.18, 0.25, 0.12, 0.3], v), 0.0, 0.15, amt=pick([0.45, 0.55, 0.4], v))
-    p.amp(0.0, pick([0.35, 0.5, 0.28], v), pick([0.15, 0.0, 0.25], v), 0.12, vel=0.4)
-    p.mod(4, S_VEL, D_CUT, 0.15)
-    if v % 4 == 3:
-        p.sat(0.3, 0.55)
-    return p, ["Pluck"]
+def first_808_clean(p, r):
+    """the first 808: pure sine, no FX, no LFO, no mods (the self-test checks MUTATE keeps it asleep)"""
 
 
-def b_house(v, rng):
-    p = Patch().mono(t2=False)
-    if v % 2 == 0:                                      # organ-ish: sine + square an octave up
-        p.o1(W_SIN, octave=-1, level=0.85).o2(W_SQR, octave=0, level=0.3)
-        p.filt(pick([1400, 1800, 1100], v), 0.0)
-    else:                                               # rubbery: square through a short env
-        p.o1(W_SQR, octave=-1, shape=pick([0.2, 0.35], v), level=0.8).o2(W_SIN, octave=-1, level=0.5)
-        p.filt(pick([350, 450], v), 0.25).fenv(0.0, 0.16, 0.1, 0.1, amt=0.35)
-    p.amp(0.0, pick([0.25, 0.32, 0.2], v), pick([0.0, 0.3], v), 0.08, vel=0.35)
-    p.sh["song_tempo"] = 124.0
-    return p, ["House"]
+ARCHES = [
+    # ------------------------------------------------------------ BASS (84)
+    Arch("Bass", "808", 10, ["808", "Sub"], core_808, {
+        "source": [src_808_pure(), src_808_click(), src_808_tri(), src_808_square()],
+        "fx": [fx_dry(), fx_tape(), fx_drive(), fx_tube()],
+        "motion": [mv_still(), mv_still(), mv_wheel()],
+        "layer": [lay_none(), lay_none(), Opt("Grit", lambda p, o, r: p.layer(r.uniform(0.25, 0.35), osc1_wave=W_SQR, osc1_octave=0,
+                  filter_cutoff=cut(r.uniform(700, 1400)), filter_reso=0.2, amp_pan=0.0), ["Layer"])],
+    }, first={"source": 0, "fx": 0, "motion": 0, "layer": 0}),
+    Arch("Bass", "Sub", 6, ["Sub"], lambda p, r: (p.mono(glide=r.choice([0.0, 0.08]), legato=True),
+                                                    p.amp(0.004, 0.2, 1.0, 0.12, vel=0.1)), {
+        "source": [src_sine_tri(), Opt(None, lambda p, o, r: p.o1(W_SIN, octave=o, level=0.9)),
+                   Opt("Pulse", lambda p, o, r: (p.o1(W_SIN, octave=o, level=0.85), p.o2(W_SQR, octave=o + 1, shape=0.3, level=0.2)))],
+        "filter": [flt(None, F_LP24, 600, 0.0, key=0.0), flt("Soft", F_LP12, 350, 0.1, key=0.0), flt(None, F_LP24, 900, 0.05, key=0.0)],
+        "fx": [fx_dry(), fx_tape(), fx_tube()],
+    }),
+    Arch("Bass", "Reese", 14, ["Reese"], core_bass(glide=0.0), {
+        "source": [src_saws((9, 20)), src_saw_pulse(), src_squares(), src_pwm(), src_digital("detune"),
+                   src_digital("analog"), src_digital("metal"), src_digital("bright"), src_hybrid(),
+                   src_sync((0.1, 0.25)), src_ring()],
+        "filter": [flt(None, F_LP24, 800, 0.15, env=0.12, dec=0.4, sus=0.6), flt("Hollow", F_BP12, 900, 0.35),
+                   flt("Dark", F_LP24, 450, 0.25), flt("Open", F_LP12, 2200, 0.1), flt("Nasal", F_LP24, 1100, 0.45)],
+        "layer": [lay_none(), lay_none(), lay_sub(), lay_octave(True), lay_texture(), lay_split()],
+        "motion": [mv_still(), mv_drift(), mv_drift((0.15, 0.3)), mv_morph(), mv_pan(), mv_synced(("1/4", "1/2", "1/8"), (0.15, 0.3))],
+        "fx": [fx_dry(), fx_phaser(), fx_flanger(), fx_drive(), fx_tape(), fx_phase_drive(), fx_chorus()],
+    }, first={"source": 0, "fx": 0, "motion": 0, "layer": 0}),
+    Arch("Bass", "Growl", 8, ["Growl", "Distorted"], core_bass(glide=0.05), {
+        "source": [src_fm((0.2, 0.4)), src_digital("metal"), src_digital("vocal"), src_sync((0.3, 0.6)),
+                   src_ring(), src_hybrid()],
+        "filter": [flt(None, F_LP24, 900, 0.4), flt("Vowel", F_BP12, 1100, 0.5), flt("Snarl", F_LP12, 1500, 0.55)],
+        "motion": [mv_synced(("1/8", "1/16", "1/12"), (0.4, 0.65)), mv_morph(), mv_steps((0.3, 0.45))],
+        "layer": [lay_none(), lay_sub(), lay_split()],
+        "fx": [fx_drive(), fx_phase_drive(), Opt("Crushed", lambda p, o, r: (p.drive(0.6, 0.7), p.sat(0.4, 0.5)), ["Distorted"])],
+    }),
+    Arch("Bass", "Wobble", 8, ["Wobble"], core_bass(glide=0.06), {
+        "source": [src_saws((4, 8)), src_saw_pulse(), src_squares(), src_digital("analog"), src_fm((0.1, 0.2))],
+        "filter": [flt(None, F_LP24, 200, 0.4, key=0.3), flt("Talking", F_BP12, 400, 0.5, key=0.3), flt("Rubber", F_LP12, 250, 0.55, key=0.3)],
+        "motion": [mv_synced(("1/4", "1/8", "1/12", "3/8", "1/6"), (0.6, 0.8))],
+        "layer": [lay_none(), lay_sub(), lay_octave(True)],
+        "fx": [fx_drive(), fx_dry(), fx_tape(), fx_phase_drive()],
+    }),
+    Arch("Bass", "Pluck Bass", 10, ["Pluck"], lambda p, r: (p.mono(t2=True) if r.random() < 0.6 else None,
+                                                           p.amp(0.0, r.choice([0.3, 0.45, 0.6]), r.choice([0.0, 0.15, 0.25]), 0.12, vel=0.4),
+                                                           p.mod(4, S_VEL, D_CUT, 0.15)), {
+        "source": [src_saws((3, 7)), src_saw_pulse(), src_squares(), src_digital("wood"), src_digital("reed"),
+                   src_fm((0.15, 0.3)), src_sine_tri()],
+        "filter": [flt(None, F_LP24, 200, 0.2, env=0.5, dec=0.2), flt("Snappy", F_LP24, 160, 0.35, env=0.6, dec=0.12),
+                   flt("Round", F_LP12, 260, 0.1, env=0.4, dec=0.3), flt("Hollow", F_BP12, 500, 0.3, env=0.35, dec=0.2)],
+        "layer": [lay_none(), lay_sub(), lay_octave(True)],
+        "fx": [fx_dry(), fx_tape(), fx_tube(), fx_chorus(), fx_delay()],
+    }),
+    Arch("Bass", "Groove Bass", 8, ["House"], lambda p, r: (p.mono(t2=False), p.amp(0.0, r.choice([0.35, 0.5]), r.choice([0.0, 0.3]), 0.1, vel=0.35)), {
+        "source": [Opt("Organ", lambda p, o, r: (p.o1(W_SIN, octave=-1, level=0.85), p.o2(W_SQR, octave=0, level=0.3)), ["Organ"]),
+                   src_squares(), src_digital("reed"), src_sine_tri(), src_fm((0.1, 0.2))],
+        "filter": [flt(None, F_LP24, 1400, 0.0), flt("Rubbery", F_LP24, 400, 0.3, env=0.35, dec=0.15), flt("Muted", F_LP12, 700, 0.1)],
+        "fx": [fx_dry(), fx_tape(), fx_chorus()],
+    }),
+    Arch("Bass", "Mono Bass", 10, ["Analog"], lambda p, r: (p.mono(glide=r.choice([0.0, 0.0, 0.1]), legato=r.random() < 0.5),
+                                                          p.amp(0.002, 0.4, 0.9, 0.15, vel=0.3)), {
+        "source": [src_saws((4, 9)), src_saw_pulse(), src_squares(), src_pwm(), src_digital("analog"), src_sync((0.15, 0.3))],
+        "filter": [flt(None, F_LP24, 350, 0.25, env=0.35, dec=0.3, sus=0.2), flt("Bright", F_LP12, 700, 0.2, env=0.3, dec=0.4, sus=0.3),
+                   flt("Squelchy", F_LP24, 300, 0.55, env=0.45, dec=0.25), flt("Dark", F_LP24, 220, 0.15, env=0.25, dec=0.5, sus=0.4)],
+        "layer": [lay_none(), lay_sub(), lay_wide()],
+        "fx": [fx_dry(), fx_tube(), fx_tape(), fx_drive(), fx_chorus()],
+    }),
+    Arch("Bass", "Acid", 6, ["Acid", "Glide"], lambda p, r: (p.mono(glide=r.choice([0.08, 0.1]), legato=True),
+                                                            p.amp(0.0, 0.3, 0.85, 0.08, vel=0.2), p.mod(4, S_VEL, D_CUT, 0.2)), {
+        "source": [Opt(None, lambda p, o, r: p.o1(W_SAW, octave=-1, level=0.85)), Opt("Square", lambda p, o, r: p.o1(W_SQR, octave=-1, level=0.85), ["Square"]),
+                   Opt("Digital", lambda p, o, r: p.o1(W_DIG, octave=-1, digital=dig("analog", r.randrange(8)), level=0.85), ["Digital"])],
+        "filter": [flt(None, F_LP24, 260, 0.72, env=0.5, dec=0.18, key=0.35), flt("Screaming", F_LP24, 320, 0.82, env=0.55, dec=0.14, key=0.35),
+                   flt("Rubber", F_LP12, 240, 0.7, env=0.45, dec=0.25, key=0.35)],
+        "fx": [fx_drive(), fx_delay(), fx_dry(), fx_phase_drive()],
+    }),
+    Arch("Bass", "FM Bass", 4, ["FM"], lambda p, r: (p.mono(t2=False), p.amp(0.0, 0.5, r.choice([0.4, 0.6]), 0.12, vel=0.35)), {
+        "source": [src_fm((0.25, 0.45)), src_fm((0.15, 0.3))],
+        "filter": [flt(None, F_LP24, 1300, 0.1, env=0.3, dec=0.2, sus=0.25), flt("Knocky", F_LP24, 900, 0.2, env=0.45, dec=0.1)],
+        "fx": [fx_dry(), fx_tape(), fx_chorus()],
+    }),
+    # ------------------------------------------------------------ LEAD (56)
+    Arch("Lead", "Supersaw", 10, ["Supersaw"], lambda p, r: (p.unison(r.uniform(14, 22)), p.amp(0.004, 0.4, 1.0, r.choice([0.25, 0.35, 0.5]), vel=0.2)), {
+        "source": [src_saws((4, 8)), src_saw_pulse(), src_digital("detune"), src_digital("bright"), src_hybrid()],
+        "filter": [flt(None, F_LP24, 6000, 0.1, env=0.12, dec=0.5, sus=0.6), flt("Smooth", F_LP12, 3500, 0.15), flt("Cutting", F_LP24, 9000, 0.2)],
+        "layer": [lay_none(), lay_octave(True), lay_wide(), lay_fifth()],
+        "motion": [mv_still(), mv_wheel(), mv_pan()],
+        "fx": [fx_chorus_delay(), fx_space(), fx_delay(), fx_phaser()],
+    }),
+    Arch("Lead", "Square Lead", 6, ["Square"], lambda p, r: (p.mono(legato=r.random() < 0.5), p.amp(0.003, 0.3, 1.0, 0.2, vel=0.2),
+                                                           p.lfo2(L_TRI, 5.5), p.sh.__setitem__("voice_vib", 0.5)), {
+        "source": [src_squares(), src_pwm(), Opt("Chip", lambda p, o, r: p.o1(W_SQR, shape=r.choice([0.0, 0.5]), level=0.8), ["Chip"]),
+                   src_saw_pulse(), src_digital("reed"), src_ring()],
+        "filter": [flt(None, F_LP24, 4000, 0.1), flt("Soft", F_LP12, 2400, 0.1), flt("Nasal", F_BP12, 1600, 0.4), flt("Thin", F_HP12, 500, 0.1)],
+        "fx": [fx_delay(), fx_room(), fx_chorus_delay(), fx_dry()],
+        "layer": [lay_none(), lay_octave(False), lay_wide(), lay_fifth()],
+        "motion": [mv_still(), mv_wheel(), mv_pan(), mv_morph()],
+    }),
+    Arch("Lead", "Sync Lead", 7, ["Sync"], lambda p, r: (p.mono(legato=True), p.amp(0.003, 0.3, 1.0, 0.25, vel=0.2),
+                                                       p.fenv(0.0, r.choice([0.25, 0.4, 0.6]), r.choice([0.15, 0.3]), 0.3), p.mod(4, S_WHEEL, D_O2PITCH, 0.35)), {
+        "source": [src_sync((0.4, 0.75))],
+        "filter": [flt(None, F_LP24, 5000, 0.12), flt("Thin", F_HP12, 400, 0.1), flt("Biting", F_LP12, 3000, 0.35)],
+        "layer": [lay_none(), lay_octave(False), lay_wide()],
+        "fx": [fx_delay(), fx_drive(), fx_room(), fx_phaser()],
+    }),
+    Arch("Lead", "Glide Lead", 8, ["Glide", "Mono"], lambda p, r: (p.mono(glide=r.choice([0.15, 0.18, 0.25, 0.3]), legato=True),
+                                                                p.amp(0.004, 0.3, 1.0, 0.3, vel=0.15), p.lfo2(L_SIN, 5.2), p.sh.__setitem__("voice_vib", 0.6)), {
+        "source": [src_saws((4, 8)), src_saw_pulse(), src_digital("reed"), src_digital("vocal"), src_sine_tri()],
+        "filter": [flt(None, F_LP24, 3000, 0.25, env=0.2, dec=0.5, sus=0.45), flt("Mellow", F_LP12, 1800, 0.15), flt("Nasal", F_BP12, 1500, 0.4)],
+        "fx": [fx_delay(), fx_space(), fx_tube(), fx_chorus_delay()],
+    }),
+    Arch("Lead", "Soft Lead", 6, ["Soft"], lambda p, r: (p.mono(legato=True), p.amp(r.choice([0.03, 0.06]), 0.3, 1.0, 0.35, vel=0.3),
+                                                       p.lfo2(L_SIN, 5.0), p.sh.__setitem__("voice_vib", 0.7)), {
+        "source": [src_sine_tri(), Opt("Breathy", lambda p, o, r: (p.o1(W_SIN, level=0.85), p.noise(r.uniform(0.05, 0.12))), ["Breath"]),
+                   src_digital("wood", W_SIN), src_digital("reed", W_SIN)],
+        "filter": [flt(None, F_LP24, 3000, 0.0), flt("Dark", F_LP12, 1800, 0.05)],
+        "fx": [fx_space(), fx_delay(), fx_chorus_delay()],
+        "layer": [lay_none(), lay_octave(True), lay_wide()],
+    }),
+    Arch("Lead", "Digital Lead", 7, ["Digital"], lambda p, r: (p.mono(legato=True), p.amp(0.005, 0.3, 1.0, 0.25, vel=0.2),
+                                                             p.mod(4, S_WHEEL, D_O1SHAPE, 0.5)), {
+        "source": [src_digital("vocal"), src_digital("bright"), src_digital("metal"), src_digital("reed"), src_hybrid()],
+        "filter": [flt(None, F_LP24, 4500, 0.12), flt("Formant", F_BP12, 1800, 0.45), flt("Thin", F_HP12, 600, 0.15)],
+        "motion": [mv_still(), mv_morph(), mv_drift()],
+        "fx": [fx_delay(), fx_room(), fx_phaser(), fx_chorus_delay()],
+    }),
+    Arch("Lead", "Rave Lead", 6, ["Rave"], lambda p, r: None, {   # six fixed designs (see l_rave)
+        "design": [Opt(None, lambda p, o, r, k=k: rave_design(p, k, r)) for k in range(6)],
+    }, words=["design"]),
+    Arch("Lead", "Pluck Lead", 6, ["Pluck"], lambda p, r: (p.spread(0.3), p.amp(0.0, 0.45, 0.35, 0.3, vel=0.4)), {
+        "source": [src_saws((4, 8)), src_saw_pulse(), src_digital("bell"), src_digital("wood"), src_fm((0.1, 0.25))],
+        "filter": [flt(None, F_LP24, 800, 0.2, env=0.5, dec=0.25, sus=0.1), flt("Glassy", F_LP12, 1500, 0.3, env=0.4, dec=0.2)],
+        "fx": [fx_delay(), fx_chorus_delay(), fx_space()],
+        "layer": [lay_none(), lay_wide(), lay_octave(True), lay_fifth()],
+        "motion": [mv_still(), mv_pan(), mv_morph()],
+    }),
+    # ------------------------------------------------------------ PAD (56)
+    Arch("Pad", "Supersaw Pad", 10, ["Supersaw"], lambda p, r: (p.spread(r.uniform(0.5, 0.85)),
+                                                             p.amp(r.choice([0.2, 0.4, 0.7]), 1.0, 1.0, r.choice([1.2, 1.8, 2.4]), vel=0.15)), {
+        "source": [src_saws((6, 11)), src_saw_pulse(), src_digital("detune"), src_digital("bright"), src_hybrid()],
+        "filter": [flt(None, F_LP24, 4000, 0.08), flt("Warm", F_LP12, 2000, 0.1), flt("Airy", F_HP12, 300, 0.1)],
+        "layer": [lay_wide(), lay_octave(True), lay_fifth(), lay_texture()],
+        "motion": [mv_still(), mv_drift(), mv_pan(), mv_synced(("1/2", "1/4", "1/1"), (0.15, 0.3))],
+        "fx": [fx_space(), fx_chorus(), fx_phaser(), fx_chorus_delay()],
+    }),
+    Arch("Pad", "Analog Pad", 10, ["Warm", "Analog"], lambda p, r: (p.spread(0.35),
+                                                                  p.amp(r.choice([0.3, 0.6, 0.9]), 1.0, 1.0, r.choice([1.2, 1.8]), vel=0.15),
+                                                                  p.fenv(r.choice([0.4, 0.8]), 1.5, 0.6, 1.5, amt=r.uniform(0.1, 0.2))), {
+        "source": [src_saws((5, 9)), src_saw_pulse(), src_pwm(), src_squares(), src_digital("analog")],
+        "filter": [flt(None, F_LP24, 1100, 0.15), flt("Dark", F_LP24, 650, 0.2), flt("Soft", F_LP12, 1600, 0.1), flt("Resonant", F_LP24, 900, 0.45)],
+        "layer": [lay_wide(), lay_octave(False), lay_none()],
+        "motion": [mv_drift(), mv_morph(), mv_pan(), mv_still()],
+        "fx": [fx_chorus(), fx_space(), fx_tube(), fx_phaser()],
+    }),
+    Arch("Pad", "Air Pad", 8, ["Airy"], lambda p, r: (p.spread(0.5), p.amp(r.choice([0.6, 1.0]), 1.0, 1.0, 2.5, vel=0.1), p.eq(high=2.0)), {
+        "source": [Opt("Breathy", lambda p, o, r: (p.o1(W_SAW, octave=r.choice([0, 1]), level=0.9), p.o2(W_SAW, octave=1, fine=8, level=0.6), p.noise(r.uniform(0.08, 0.18))), ["Breath"]),
+                   src_digital("vocal"), src_digital("bell"), src_sine_tri()],
+        "filter": [flt(None, F_HP12, 250, 0.1), flt("Thin", F_HP12, 450, 0.2), flt("Soft", F_LP12, 3500, 0.05)],
+        "layer": [lay_wide(), lay_octave(True), lay_texture()],
+        "motion": [mv_drift(), mv_pan(), mv_still()],
+        "fx": [fx_space(), fx_chorus_delay()],
+    }),
+    Arch("Pad", "Motion Pad", 8, ["Evolving", "Digital"], lambda p, r: (p.spread(0.3), p.amp(r.choice([0.7, 1.0, 1.5]), 1.0, 1.0, 2.5, vel=0.1)), {
+        "source": [src_digital("analog"), src_digital("bright"), src_digital("vocal"), src_digital("wood"), src_digital("detune"), src_hybrid()],
+        "filter": [flt(None, F_LP24, 1800, 0.2), flt("Glassy", F_BP12, 1500, 0.3), flt("Open", F_LP12, 4000, 0.1)],
+        "layer": [lay_texture(), lay_octave(True), lay_fifth(), lay_wide()],
+        "motion": [mv_morph(), mv_synced(("1/2", "1/4", "1/8"), (0.15, 0.3)), mv_steps((0.12, 0.22)), mv_drift((0.15, 0.25))],
+        "fx": [fx_space(), fx_phaser(), fx_flanger(), fx_chorus_delay()],
+    }),
+    Arch("Pad", "Dark Pad", 8, ["Dark", "Cinematic"], lambda p, r: (p.spread(0.4), p.amp(r.choice([0.8, 1.2]), 1.0, 1.0, 2.5, vel=0.1)), {
+        "source": [Opt(None, lambda p, o, r: (p.o1(W_SAW, octave=-1, level=0.7), p.o2(W_SQR, octave=-1, fine=-9, level=0.5))),
+                   src_digital("metal"), src_digital("vocal"), src_ring(), src_squares()],
+        "filter": [flt(None, F_LP24, 500, 0.25), flt("Murky", F_LP24, 320, 0.35), flt("Hollow", F_BP12, 600, 0.4)],
+        "layer": [lay_octave(True), lay_texture(), lay_sub(), lay_fifth()],
+        "motion": [mv_drift(), mv_pan(), mv_morph()],
+        "fx": [fx_space(), fx_phaser(), fx_flanger()],
+    }),
+    Arch("Pad", "Glass Pad", 6, ["Glass"], lambda p, r: (p.spread(0.25), p.amp(r.choice([0.4, 0.7]), 1.2, 0.8, 2.2, vel=0.25), p.eq(high=1.5)), {
+        "source": [src_digital("bell", W_SIN), src_digital("bright", W_SIN), src_digital("metal", W_SIN), src_fm((0.1, 0.2))],
+        "filter": [flt(None, F_LP24, 6000, 0.05), flt("Ringing", F_BP12, 2500, 0.4)],
+        "layer": [lay_wide(), lay_octave(True), lay_fifth()],
+        "motion": [mv_still(), mv_pan(), mv_synced(("1/4", "1/8"), (0.1, 0.2))],
+        "fx": [fx_space(), fx_chorus_delay()],
+    }),
+    Arch("Pad", "Strings", 6, ["Strings"], lambda p, r: (p.spread(0.3), p.amp(r.choice([0.25, 0.4, 0.6]), 1.0, 1.0, 1.2, vel=0.3),
+                                                       p.lfo2(L_SIN, 5.0), p.sh.__setitem__("voice_vib", 0.4)), {
+        "source": [src_pwm(), src_saws((5, 9)), src_digital("reed"), src_digital("analog")],
+        "filter": [flt(None, F_LP24, 2600, 0.05), flt("Silky", F_LP12, 3500, 0.05), flt("Dark", F_LP24, 1500, 0.1)],
+        "layer": [lay_wide(), lay_octave(True)],
+        "fx": [fx_chorus(), fx_space(), fx_phaser()],
+        "motion": [mv_still(), mv_drift((0.05, 0.1)), mv_pan()],
+    }),
+    # ------------------------------------------------------------ PLUCK (40)
+    Arch("Pluck", "Future Pluck", 10, ["Future", "Chord"], lambda p, r: (p.spread(r.uniform(0.5, 0.75)),
+                                                                       p.amp(0.0, r.choice([0.4, 0.55, 0.7]), 0.0, 0.4, vel=0.35)), {
+        "source": [src_saws((6, 10)), src_saw_pulse(), src_digital("bright"), src_digital("detune"), src_hybrid(), src_squares()],
+        "filter": [flt(None, F_LP24, 700, 0.15, env=0.5, dec=0.3, sus=0.05), flt("Snappy", F_LP24, 500, 0.3, env=0.6, dec=0.18),
+                   flt("Soft", F_LP12, 900, 0.1, env=0.4, dec=0.35)],
+        "layer": [lay_wide(), lay_octave(True), lay_fifth(), lay_none()],
+        "fx": [fx_chorus_delay(), fx_space(), fx_delay(), fx_phaser()],
+    }),
+    Arch("Pluck", "Mallet", 8, ["Mallet"], lambda p, r: p.amp(0.0, r.choice([0.3, 0.45, 0.6]), 0.0, 0.4, vel=0.5), {
+        "source": [src_fm((0.08, 0.2)), src_sine_tri(), src_digital("wood", W_SIN), src_digital("bell", W_SIN)],
+        "filter": [flt(None, F_LP24, 5000, 0.0), flt("Soft", F_LP12, 2500, 0.05)],
+        "layer": [lay_none(), lay_octave(True), lay_wide()],
+        "fx": [fx_room(), fx_delay(), fx_chorus(), fx_space()],
+    }),
+    Arch("Pluck", "House Pluck", 8, ["Deep", "House"], lambda p, r: (p.spread(0.2), p.amp(0.0, 0.6, 0.2, 0.35, vel=0.4)), {
+        "source": [src_squares(), src_saws((4, 8)), src_digital("reed"), src_digital("analog"), src_pwm()],
+        "filter": [flt(None, F_LP24, 450, 0.3, env=0.35, dec=0.3, sus=0.15), flt("Dub", F_LP24, 350, 0.45, env=0.3, dec=0.4, sus=0.2),
+                   flt("Bright", F_LP12, 900, 0.2, env=0.3, dec=0.25)],
+        "fx": [fx_chorus_delay(), fx_delay(), fx_space(), fx_phaser()],
+        "layer": [lay_none(), lay_wide(), lay_octave(True), lay_fifth()],
+        "motion": [mv_still(), mv_pan(), mv_steps((0.1, 0.2))],
+    }),
+    Arch("Pluck", "Kalimba", 6, ["Wood"], lambda p, r: p.amp(0.0, r.choice([0.3, 0.45]), 0.0, 0.35, vel=0.5), {
+        "source": [src_digital("wood", W_SIN), src_digital("bell", W_SIN), src_digital("reed", W_SIN), src_fm((0.1, 0.18)),
+                   src_hybrid(), src_digital("metal", W_SIN)],
+        "filter": [flt(None, F_LP24, 4000, 0.05), flt("Muted", F_LP12, 2000, 0.1)],
+        "fx": [fx_delay(), fx_room(), fx_chorus_delay()],
+        "layer": [lay_none(), lay_octave(True), lay_wide()],
+    }),
+    Arch("Pluck", "Harp", 8, ["Harp"], lambda p, r: p.amp(0.0, r.choice([0.7, 1.0, 1.3]), 0.0, 0.8, vel=0.45), {
+        "source": [src_saws((3, 6)), src_sine_tri(), src_squares(), src_digital("reed"), src_digital("wood")],
+        "filter": [flt(None, F_LP24, 1500, 0.1, env=0.35, dec=0.5), flt("Bright", F_LP12, 2500, 0.1, env=0.3, dec=0.4)],
+        "layer": [lay_none(), lay_wide(), lay_octave(True)],
+        "fx": [fx_space(), fx_chorus(), fx_room()],
+    }),
+    # ------------------------------------------------------------ KEYS (32)
+    Arch("Keys", "Electric Piano", 10, ["EP"], lambda p, r: (p.amp(0.0, r.choice([1.1, 1.5, 2.2]), 0.25, 0.4, vel=0.6), p.mod(4, S_VEL, D_CUT, 0.2)), {
+        "source": [src_fm((0.12, 0.3)), Opt("Bell", lambda p, o, r: (p.o1(W_SIN, level=0.8), p.o2(W_SIN, octave=2, level=0.0), p.t1.__setitem__("osc2_level", 1.0), p.t1.__setitem__("fm_amt", r.uniform(0.2, 0.35))), ["FM"]),
+                   src_digital("bell", W_SIN), src_sine_tri()],
+        "filter": [flt(None, F_LP24, 3500, 0.0), flt("Mellow", F_LP12, 2000, 0.0), flt("Bright", F_LP24, 6000, 0.05)],
+        "motion": [mv_still(), mv_pan()],
+        "fx": [fx_chorus(), fx_phaser(), fx_tube(), fx_room(), fx_chorus_delay()],
+        "layer": [lay_none(), lay_octave(True), lay_wide()],
+    }),
+    Arch("Keys", "Organ", 8, ["Organ"], lambda p, r: p.amp(0.002, 0.2, 1.0, 0.08, vel=0.1), {
+        "source": [Opt(None, lambda p, o, r: (p.o1(W_SIN, level=0.75), p.o2(W_SIN, octave=1, level=0.55))),
+                   Opt("Fifth", lambda p, o, r: (p.o1(W_SIN, level=0.75), p.o2(W_SIN, octave=1, pitch=7, level=0.4))),
+                   Opt("Reedy", lambda p, o, r: (p.o1(W_SQR, level=0.7), p.o2(W_SIN, octave=1, level=0.5)), ["Reedy"]),
+                   src_digital("reed", W_SIN)],
+        "filter": [flt(None, F_LP24, 4000, 0.0), flt("Muted", F_LP12, 2200, 0.0)],
+        "fx": [fx_chorus(), fx_phaser(), Opt("Driven", lambda p, o, r: (p.chorus(0.4, 0.4, 0.4), p.drive(0.3, 0.4)), ["Distorted"]), fx_room()],
+        "motion": [mv_still(), mv_pan(), mv_synced(("1/8", "1/16"), (0.08, 0.15))],
+    }),
+    Arch("Keys", "Chord Keys", 8, ["Chord", "Stab"], lambda p, r: (p.spread(0.3), p.amp(0.0, r.choice([0.45, 0.6, 0.35]), r.choice([0.0, 0.25]), 0.2, vel=0.4)), {
+        "source": [src_saws((4, 8)), src_saw_pulse(), src_squares(), src_digital("analog"), src_digital("reed")],
+        "filter": [flt(None, F_LP24, 1800, 0.15, env=0.3, dec=0.25), flt("Dark", F_LP24, 1100, 0.2, env=0.3, dec=0.3), flt("Bright", F_LP12, 3000, 0.1)],
+        "layer": [lay_none(), lay_wide(), lay_octave(True)],
+        "fx": [fx_chorus_delay(), fx_room(), fx_phaser(), fx_delay()],
+    }),
+    Arch("Keys", "Clav", 6, ["Clav"], lambda p, r: p.amp(0.0, 0.4, 0.3, 0.1, vel=0.6), {
+        "source": [Opt(None, lambda p, o, r: (p.o1(W_SQR, shape=0.55, level=0.95), p.o2(W_SAW, octave=1, level=0.4))),
+                   src_digital("reed"), src_digital("wood")],
+        "filter": [flt(None, F_LP12, 2600, 0.3, env=0.35, dec=0.15, sus=0.1), flt("Wah", F_BP12, 1500, 0.45, env=0.4, dec=0.2)],
+        "fx": [fx_phaser(), fx_chorus(), fx_dry(), fx_tube()],
+        "motion": [mv_still(), mv_synced(("1/8", "1/16"), (0.2, 0.35)), mv_drift((0.1, 0.2))],
+        "layer": [lay_none(), lay_octave(False)],
+    }),
+    # ------------------------------------------------------------ BELL (18)
+    Arch("Bell", "Bell", 10, ["FM"], lambda p, r: p.amp(0.0, r.choice([1.8, 2.5, 3.5]), 0.0, 2.0, vel=0.5), {
+        "source": [Opt(None, lambda p, o, r: (p.o1(W_SIN, level=0.8), p.o2(W_SIN, octave=r.choice([1, 2]), level=0.0),
+                                              p.t1.__setitem__("osc2_level", 1.0), p.t1.__setitem__("fm_amt", r.uniform(0.25, 0.5)))),
+                   Opt("Ring", lambda p, o, r: (p.o1(W_SIN, level=0.7), p.o2(W_SIN, octave=2, level=0.5), p.t1.__setitem__("osc_mod", 1)), ["Ring"]),
+                   src_digital("bell", W_SIN), src_digital("metal", W_SIN)],
+        "filter": [flt(None, F_LP24, 8000, 0.0), flt("Soft", F_LP12, 4000, 0.0)],
+        "layer": [lay_none(), lay_octave(True), lay_wide(), lay_fifth()],
+        "fx": [fx_space(), fx_delay(), fx_chorus_delay()],
+    }),
+    Arch("Bell", "Music Box", 8, ["Digital"], lambda p, r: p.amp(0.0, r.choice([1.5, 2.0, 2.8]), 0.0, 1.6, vel=0.45), {
+        "source": [src_digital("bell", W_SIN), src_digital("bright", W_SIN), src_digital("metal", W_SIN), src_hybrid()],
+        "filter": [flt(None, F_LP24, 9000, 0.0), flt("Hollow", F_BP12, 3000, 0.3)],
+        "layer": [lay_wide(), lay_octave(True), lay_none()],
+        "fx": [fx_delay(), fx_space(), fx_room()],
+    }, boost=1.35),
+    # ------------------------------------------------------------ ARP (34) / SEQUENCE (18)
+    Arch("Arp", "Arp", 34, [], lambda p, r: (p.amp(0.0, r.choice([0.2, 0.3, 0.45]), r.choice([0.0, 0.3, 0.5]), 0.15, vel=0.3)), {
+        "source": [src_saws((6, 10)), src_squares(), src_digital("bell", W_SIN), src_digital("bright"), src_fm((0.1, 0.2)),
+                   src_sine_tri(), src_digital("wood", W_SIN), src_pwm(), src_sync((0.2, 0.4))],
+        "filter": [flt(None, F_LP24, 2500, 0.15, env=0.35, dec=0.15), flt("Resonant", F_LP24, 600, 0.45, env=0.45, dec=0.12),
+                   flt("Open", F_LP12, 7000, 0.05), flt("Thin", F_HP12, 500, 0.15)],
+        "pattern": [Opt(None, lambda p, o, r, m=m, rt=rt, oc=oc: p.arp(rate=rt, mode=m, gate=r.uniform(0.4, 0.7), octaves=oc,
+                                                                        tempo=r.choice([110.0, 120.0, 124.0, 128.0, 138.0])))
+                    for m, rt, oc in [(ARP_UP, "1/16", 2), (ARP_ALT1, "1/16", 2), (ARP_DOWN, "1/16", 1), (ARP_UP, "1/8", 3),
+                                      (ARP_ALT2, "1/16T", 2), (ARP_RND, "1/16", 2), (ARP_UP, "1/8T", 1), (ARP_ALT1, "1/32", 1)]],
+        "layer": [lay_none(), lay_wide(), lay_octave(True)],
+        "motion": [mv_still(), mv_synced(("1/2", "1/1"), (0.15, 0.3)), mv_pan()],
+        "fx": [fx_delay(), fx_chorus_delay(), fx_space(), fx_phaser(), fx_dry()],
+    }, words=["source", "filter", "layer", "motion", "fx"]),
+    Arch("Sequence", "Sequence", 18, [], lambda p, r: p.amp(0.0, r.choice([0.15, 0.25]), r.choice([0.1, 0.3]), 0.1, vel=0.3), {
+        "source": [Opt("Bass", lambda p, o, r: (p.mono(t2=False), p.o1(W_SAW, octave=-1, level=0.8), p.o2(W_SQR, octave=-1, fine=5, level=0.5)), ["Bass"]),
+                   src_saws((5, 9)), src_squares(), src_digital("reed"), src_digital("metal"), src_fm((0.15, 0.3))],
+        "filter": [flt(None, F_LP24, 300, 0.4, env=0.45, dec=0.12), flt("Bright", F_LP12, 1500, 0.25, env=0.3, dec=0.1), flt("Hollow", F_BP12, 900, 0.4, env=0.3, dec=0.1)],
+        "pattern": [Opt(None, lambda p, o, r, st=st: p.arp(rate=r.choice(["1/16", "1/16", "1/8"]), mode=r.choice([ARP_TRIG, ARP_UP, ARP_ALT1]),
+                                                          gate=r.uniform(0.35, 0.6), octaves=1, tempo=r.choice([122.0, 124.0, 128.0, 132.0]),
+                                                          swing=r.choice([0.0, 0.0, 0.2, 0.35]), steps=st))
+                    for st in ["xx.xx.x.", "x.xx.xx.", "x..x..x.", "xxx.xx.x", "x.x.xxx.", "x..xx.x.", "xx.x.xx.", "x.xxx..x"]],
+        "motion": [mv_still(), mv_synced(("1/1", "1/2"), (0.15, 0.3))],
+        "fx": [fx_delay(), fx_dry(), fx_chorus(), fx_drive()],
+    }),
+    # ------------------------------------------------------------ BRASS (16) / CHOIR (12)
+    Arch("Brass", "Brass", 16, ["Synth Brass"], lambda p, r: (p.spread(0.3), p.amp(r.choice([0.02, 0.05, 0.08]), 0.5, 0.9, 0.35, vel=0.4),
+                                                            p.mod(4, S_VEL, D_CUT, 0.15)), {
+        "source": [src_saws((5, 9)), src_saw_pulse(), src_digital("reed"), src_digital("analog"), src_pwm(),
+                   src_sync((0.1, 0.25)), src_squares()],
+        "filter": [flt(None, F_LP24, 900, 0.12, env=0.35, dec=0.6, sus=0.45), flt("Bold", F_LP24, 1300, 0.2, env=0.4, dec=0.4, sus=0.5),
+                   flt("Soft", F_LP12, 700, 0.1, env=0.25, dec=0.8, sus=0.5)],
+        "layer": [lay_none(), lay_wide(), lay_octave(False), lay_fifth()],
+        "fx": [fx_chorus(), fx_room(), fx_space(), fx_tube()],
+        "motion": [mv_still(), mv_drift(), mv_morph(), mv_wheel()],
+    }),
+    Arch("Choir", "Choir", 12, ["Vocal"], lambda p, r: (p.spread(0.3), p.amp(r.choice([0.3, 0.5, 0.8]), 1.0, 1.0, 1.6, vel=0.2),
+                                                      p.lfo2(L_SIN, 4.8), p.sh.__setitem__("voice_vib", 0.4)), {
+        "source": [Opt(None, lambda p, o, r: (p.o1(W_DIG, digital=dig("vocal", r.randrange(8), r.randrange(2)), level=0.85),
+                                              p.o2(W_DIG, digital=dig("vocal", r.randrange(8)), fine=7, level=0.6))),
+                   src_digital("vocal", W_SIN), Opt("Breathy", lambda p, o, r: (p.o1(W_DIG, digital=dig("vocal", r.randrange(8)), level=0.85), p.noise(0.1)), ["Breath"])],
+        "filter": [flt(None, F_LP24, 3000, 0.1), flt("Formant", F_BP12, 1200, 0.35), flt("Soft", F_LP12, 2000, 0.05)],
+        "layer": [lay_wide(), lay_octave(True), lay_fifth()],
+        "fx": [fx_space(), fx_chorus(), fx_flanger()],
+    }),
+    # ------------------------------------------------------------ HIT (18) / SFX (16)
+    Arch("Hit", "Stab", 18, ["Stab"], lambda p, r: (p.spread(0.4), p.amp(0.0, r.choice([0.3, 0.45, 0.6]), 0.0, 0.3, vel=0.3)), {
+        "source": [src_saws((6, 10)), Opt("Rave", lambda p, o, r: (p.o1(W_SAW, level=0.65), p.o2(W_SAW, pitch=7, level=0.5)), ["Rave"]),
+                   Opt("Sus", lambda p, o, r: (p.o1(W_SAW, level=0.65), p.o2(W_SQR, pitch=5, level=0.45)), ["House"]),
+                   src_digital("metal"), src_squares(), Opt("Noisy", lambda p, o, r: (p.o1(W_SAW, level=0.65), p.o2(W_SAW, octave=-1, level=0.5), p.noise(0.15)), ["Impact"])],
+        "filter": [flt(None, F_LP24, 2200, 0.2, env=0.35, dec=0.25), flt("Bright", F_LP12, 4000, 0.15), flt("Dark", F_LP24, 1100, 0.25, env=0.3, dec=0.3)],
+        "layer": [lay_none(), lay_octave(False), lay_wide(), lay_fifth()],
+        "fx": [fx_chorus_delay(), fx_space(), fx_drive(), fx_delay()],
+    }),
+    Arch("SFX", "Effect", 16, [], lambda p, r: None, {
+        "design": [Opt(None, lambda p, o, r, k=k: sfx_design(p, k, r)) for k in range(8)],
+        "fx": [fx_space(), fx_delay(), fx_phaser()],
+    }, words=["design", "fx"]),
+]
 
 
-def b_analog(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.1, 0.0, 0.15], v), legato=v % 2 == 1)
-    p.o1(W_SAW, octave=-1, level=0.8).o2(pick([W_SQR, W_SAW, W_SQR], v), octave=pick([-1, -2], v),
-                                         fine=pick([6, -4, 8], v), level=0.6, shape=pick([0.0, 0.25], v))
-    p.filt(pick([320, 450, 260, 600], v), pick([0.25, 0.15, 0.35], v))
-    p.fenv(0.0, pick([0.3, 0.45, 0.22], v), pick([0.2, 0.35, 0.1], v), 0.2, amt=pick([0.35, 0.28, 0.42], v))
-    p.amp(0.002, 0.4, 0.9, 0.15, vel=0.3)
-    if v % 3 == 2:
-        p.sat(0.35, 0.5, tube=True)
-    tags = ["Analog"] + (["Glide"] if p.sh["voice_portamento"] > 0 else [])
-    return p, tags
-
-
-def b_acid(v, rng):
-    p = Patch().mono(glide=pick([0.08, 0.1], v), legato=True)
-    p.o1(pick([W_SAW, W_SQR, W_SAW], v), octave=-1, level=0.85).o2(W_SAW, level=0.0)
-    p.filt(pick([260, 320, 220], v), pick([0.72, 0.65, 0.78], v), kind=F_LP24, key=0.35)
-    p.fenv(0.0, pick([0.18, 0.25, 0.14], v), 0.0, 0.1, amt=pick([0.5, 0.42, 0.58], v))
-    p.amp(0.0, 0.3, 0.85, 0.08, vel=0.2).mod(4, S_VEL, D_CUT, 0.2)
-    p.drive(pick([0.35, 0.5, 0.25], v), 0.45)
-    if v % 2:
-        p.delay("3/16", 0.25, 0.12)
-    return p, ["Acid", "Glide"]
-
-
-def b_fm(v, rng):
-    p = Patch().mono(t2=False)
-    p.o1(W_SIN, octave=-1, level=0.9).o2(W_SIN, octave=pick([0, 1, 0], v), level=0.0)
-    p.t1["fm_amt"] = pick([0.35, 0.28, 0.42], v)
-    p.filt(pick([1200, 900, 1600], v), 0.1).fenv(0.0, 0.2, 0.25, 0.15, amt=0.3)
-    p.amp(0.0, 0.5, pick([0.6, 0.4], v), 0.12, vel=0.35)
-    if v % 2:
-        p.mod(1, S_ENV1, D_PITCH, 0.03)
-    return p, ["FM"]
-
-
-# ============================== LEAD
-def l_supersaw(v, rng):
-    p = Patch().unison(pick([16.0, 20.0, 14.0, 22.0, 18.0], v))
-    p.o1(W_SAW, level=0.7).o2(W_SAW, octave=pick([0, 1, 0, -1], v), fine=pick([7, 5, 10], v), level=0.55)
-    p.filt(pick([5200, 7000, 4200, 8800], v), 0.1).fenv(0.0, 0.5, 0.6, 0.3, amt=0.12)
-    p.amp(0.004, 0.4, 1.0, pick([0.35, 0.5, 0.25], v), vel=0.2)
-    p.chorus(0.22, 0.3, 0.3).delay(pick(["3/16", "1/8", "1/4"], v), 0.32, 0.18).verb(0.2, 0.6)
-    return p, ["Supersaw"]
-
-
-def l_square(v, rng):
-    p = Patch().mono(legato=v % 3 > 0)
-    p.o1(W_SQR, shape=pick([0.0, 0.35, 0.6], v), level=0.75).o2(W_SQR, octave=pick([0, 1], v), fine=4, level=0.3)
-    p.filt(pick([3800, 5000, 2600], v), 0.1).amp(0.003, 0.3, 1.0, 0.2, vel=0.2)
-    p.lfo2(L_TRI, 5.5).sh["voice_vib"] = 0.5
-    p.mod(3, S_WHEEL, D_O1SHAPE, 0.0)
-    p.delay(pick(["1/8", "3/16"], v), 0.28, 0.15).verb(0.12, 0.45)
-    return p, ["Square", "Chip" if v % 2 else "Mono"]
-
-
-def l_sync(v, rng):
-    p = Patch().mono(legato=True)
-    p.o1(W_SAW, level=0.0).o2(W_SAW, pitch=pick([7, 12, 5, 0], v), level=0.85)
-    p.t1["osc_mod"] = 2
-    p.fenv(0.0, pick([0.35, 0.6, 0.25], v), pick([0.15, 0.3], v), 0.3)
-    p.mod(2, S_ENV1, D_O2PITCH, pick([0.6, 0.45, 0.75], v)).mod(1, S_WHEEL, D_O2PITCH, 0.4)
-    p.filt(pick([4500, 6500, 3500], v), 0.12).amp(0.003, 0.3, 1.0, 0.25, vel=0.2)
-    p.delay("3/16", 0.3, 0.16).verb(0.14, 0.5)
-    if v % 3 == 2:
-        p.drive(0.3, 0.4)
-    return p, ["Sync"]
-
-
-def l_glide(v, rng):
-    p = Patch().mono(glide=pick([0.18, 0.25, 0.15, 0.3], v), legato=True)
-    p.o1(pick([W_SAW, W_SAW, W_SQR], v), level=0.75).o2(W_SAW, fine=pick([-7, 9, -5], v), level=0.6)
-    p.filt(pick([2800, 3600, 2200, 4400], v), pick([0.25, 0.18, 0.32], v))
-    p.fenv(0.0, 0.5, 0.45, 0.3, amt=0.2).amp(0.004, 0.3, 1.0, 0.3, vel=0.15)
-    p.lfo2(L_SIN, 5.2).sh["voice_vib"] = 0.6
-    p.delay(pick(["1/4", "3/16", "1/8"], v), 0.38, 0.2).verb(0.18, 0.6)
-    if v % 4 == 1:
-        p.sat(0.3, 0.6, tube=True)
-    return p, ["Glide", "Mono"]
-
-
-def l_soft(v, rng):
-    p = Patch().mono(legato=True)
-    p.o1(pick([W_SIN, W_TRI, W_TRI], v), level=0.85)
-    p.o2(W_SIN, octave=1, level=pick([0.15, 0.0, 0.25], v)).noise(pick([0.04, 0.08, 0.0], v))
-    p.filt(pick([3000, 2400, 4200], v), 0.0).amp(pick([0.04, 0.07, 0.02], v), 0.3, 1.0, 0.35, vel=0.3)
-    p.lfo2(L_SIN, 5.0).sh["voice_vib"] = 0.7
-    p.mod(3, S_LFO2, D_PITCH, 0.0)
-    p.chorus(0.15, 0.2, 0.2).delay("1/4", 0.35, 0.18).verb(0.25, 0.65)
-    return p, ["Soft"]
-
-
-def l_digital(v, rng):
-    fam = pick(["vocal", "bright", "reed", "vocal", "analog", "metal", "bright"], v)
-    p = Patch().mono(legato=True)
-    p.o1(W_DIG, digital=dig(fam, v, v % 2), level=0.8).o2(W_SAW, fine=6, level=pick([0.25, 0.0, 0.35], v))
-    p.filt(pick([4200, 3000, 6000], v), 0.12).amp(0.005, 0.3, 1.0, 0.25, vel=0.2)
-    p.lfo1(L_TRI, hz=pick([0.6, 1.2, 0.3], v), depth=0.6).mod(1, S_LFO1, D_CUT, 0.08)
-    p.mod(3, S_WHEEL, D_O1SHAPE, 0.5)
-    p.lfo2(L_SIN, 5.3).sh["voice_vib"] = 0.5
-    p.delay(pick(["3/16", "1/8"], v), 0.3, 0.15).verb(0.15, 0.55)
-    return p, ["Digital"] + (["Vocal"] if fam == "vocal" else [])
-
-
-def l_rave(v, rng):
-    """Six different rave leads; returns its own name noun per design."""
-    p = Patch()
-    kind = v % 6
-    if kind == 0:      # classic: pulse + saw an octave down, 4-voice stack, a short dive into the note
+def rave_design(p, kind, r):
+    """Six different rave leads (the archetype's 'design' axis)."""
+    if kind == 0:      # classic: pulse + saw an octave down, stacked, a short dive into the note
         p.unison(18.0).o1(W_SQR, shape=0.3, pwm=0.5, level=0.7).o2(W_SAW, octave=-1, level=0.55)
-        p.lfo1(L_TRI, hz=4.5, depth=0.7, key=0)                       # pulse-width movement
-        p.fenv(0.0, 0.08, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, 0.06)     # starts ~0.7 st sharp, drops in
-        p.filt(3800, 0.1).amp(0.002, 0.3, 1.0, 0.25, vel=0.15)
-        p.chorus(0.4, 0.55, 0.3).verb(0.15, 0.55)
-        return p, ["Rave", "Unison"], "Rave Lead"
+        p.lfo1(L_TRI, hz=4.5, depth=0.7, key=0)
+        p.fenv(0.0, 0.08, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, 0.06)
+        p.filt(3800, 0.1).amp(0.002, 0.3, 1.0, 0.25, vel=0.15).chorus(0.4, 0.55, 0.3).verb(0.15, 0.55)
+        return "Rave Lead", ["Unison"]
     if kind == 1:      # siren: a synced LFO swings the pitch
         p.mono(legato=True).o1(W_SQR, shape=0.15, level=0.75).o2(W_SAW, fine=6, level=0.45)
-        p.lfo1(L_TRI, sync="1/8", depth=1.0, key=2).mod(1, S_LFO1, D_PITCH, 0.12)   # +-1.4 st
+        p.lfo1(L_TRI, sync="1/8", depth=1.0, key=2).mod(1, S_LFO1, D_PITCH, 0.12)
         p.filt(4200, 0.15).amp(0.004, 0.3, 1.0, 0.3, vel=0.1).delay("3/16", 0.3, 0.16).verb(0.2, 0.6)
-        return p, ["Rave", "Siren"], "Siren"
+        return "Siren", ["Siren"]
     if kind == 2:      # dark: low and thick, timbre 2 an octave down through a resonant filter
         p.unison(14.0).o1(W_SAW, level=0.7).o2(W_SQR, octave=-1, shape=0.2, level=0.6)
         p.filt(1100, 0.35).fenv(0.0, 0.4, 0.4, 0.2, amt=0.25).amp(0.002, 0.3, 1.0, 0.2, vel=0.1)
         p.layer(0.45, osc1_octave=-1, osc2_octave=-2, filter_cutoff=cut(700), amp_pan=0.0)
         p.drive(0.4, 0.45).chorus(0.3, 0.4, 0.25, kind=3)
-        return p, ["Rave", "Dark"], "Dark Rave Lead"
+        return "Dark Rave Lead", ["Dark"]
     if kind == 3:      # sync: a hard-synced saw with an envelope sweep, stacked
         p.unison(16.0).o1(W_SAW, level=0.0).o2(W_SAW, pitch=7, level=0.8)
         p.t1["osc_mod"] = 2
         p.fenv(0.0, 0.5, 0.25, 0.3).mod(2, S_ENV1, D_O2PITCH, 0.55).mod(4, S_WHEEL, D_O2PITCH, 0.3)
         p.filt(5000, 0.1).amp(0.002, 0.3, 1.0, 0.25, vel=0.15).chorus(0.3, 0.45, 0.3).verb(0.15, 0.55)
-        return p, ["Rave", "Sync"], "Sync Rave Lead"
-    if kind == 4:      # fifth: every key plays a root + fifth chord (stab-like lead)
+        return "Sync Rave Lead", ["Sync"]
+    if kind == 4:      # fifth: every key plays a root + fifth
         p.mono(legato=True).o1(W_SAW, level=0.65).o2(W_SAW, pitch=7, fine=4, level=0.55)
         p.filt(2600, 0.2).fenv(0.0, 0.3, 0.3, 0.2, amt=0.3).amp(0.002, 0.4, 0.8, 0.25, vel=0.2)
         p.wide(6.0, 0.35).chorus(0.3, 0.4, 0.25).delay("1/8", 0.3, 0.15).verb(0.15, 0.55)
-        return p, ["Rave", "Fifth"], "Fifth Lead"
+        return "Fifth Lead", ["Fifth"]
     # rise: each note climbs into pitch from below while the filter opens
     p.unison(20.0).o1(W_SQR, shape=0.35, level=0.7).o2(W_SAW, octave=-1, level=0.5)
-    p.fenv(0.0, 0.3, 0.0, 0.2, amt=0.3).mod(2, S_ENV1, D_PITCH, -0.1)     # starts ~1.2 st low
+    p.fenv(0.0, 0.3, 0.0, 0.2, amt=0.3).mod(2, S_ENV1, D_PITCH, -0.1)
     p.filt(1600, 0.25).amp(0.01, 0.3, 1.0, 0.3, vel=0.1).chorus(0.35, 0.5, 0.3).drive(0.25, 0.35).verb(0.2, 0.6)
-    return p, ["Rave", "Rise"], "Rising Lead"
+    return "Rising Lead", ["Rise"]
 
 
-def l_pluck(v, rng):
-    p = Patch()
-    p.o1(W_SAW, level=0.7).o2(pick([W_SQR, W_SAW], v), octave=pick([1, 0], v), fine=6, level=0.45)
-    p.filt(pick([700, 900, 550], v), 0.2).fenv(0.0, pick([0.22, 0.3, 0.18], v), 0.1, 0.25, amt=0.5)
-    p.amp(0.0, 0.45, 0.35, 0.3, vel=0.4).spread(0.4)
-    p.delay(pick(["3/16", "1/8"], v), 0.38, 0.22).verb(0.18, 0.55)
-    return p, ["Pluck"]
-
-
-# ============================== PAD
-def pd_supersaw(v, rng):
-    p = Patch().spread(pick([0.6, 0.75, 0.5, 0.85], v))
-    p.o1(W_SAW, level=0.65).o2(W_SAW, octave=pick([0, 1, 0, -1], v), fine=pick([9, 6, 12], v), level=0.55)
-    p.filt(pick([3500, 5000, 2600, 6500], v), 0.08).amp(pick([0.35, 0.6, 0.2, 0.9], v), 1.0, 1.0,
-                                                        pick([1.6, 2.4, 1.2], v), vel=0.15)
-    p.wide(pick([11.0, 8.0, 14.0], v), 0.45)
-    p.chorus(0.3, 0.4, 0.2).verb(pick([0.3, 0.35, 0.25], v), 0.75, 0.45)
-    if v % 3 == 1:
-        p.delay("1/4", 0.35, 0.12)
-    return p, ["Supersaw", "Wide"]
-
-
-def pd_warm(v, rng):
-    p = Patch().spread(0.35)
-    p.o1(W_SAW, level=0.65).o2(pick([W_SQR, W_SAW, W_TRI], v), octave=pick([0, -1], v), fine=7, level=0.55)
-    p.filt(pick([900, 1300, 700, 1700], v), pick([0.15, 0.22, 0.1], v))
-    p.fenv(pick([0.6, 1.0, 0.4], v), 1.5, 0.6, 1.5, amt=pick([0.15, 0.2, 0.1], v))
-    p.amp(pick([0.5, 0.8, 0.3], v), 1.0, 1.0, pick([1.5, 2.0, 1.2], v), vel=0.15)
-    p.lfo1(L_TRI, hz=pick([0.12, 0.2, 0.08], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.08)
-    p.wide(7.0, 0.3)
-    p.chorus(0.3, 0.35, 0.18).verb(0.25, 0.7, 0.6)
-    if v % 3 == 0:
-        p.sat(0.25, 0.45, tube=True)
-    return p, ["Warm", "Analog"]
-
-
-def pd_airy(v, rng):
-    p = Patch().spread(0.5)
-    p.o1(pick([W_SAW, W_TRI, W_SAW], v), octave=pick([0, 1], v), level=0.9).o2(W_SAW, octave=1, fine=8, level=0.6)
-    p.noise(pick([0.12, 0.2, 0.08], v))
-    p.filt(pick([260, 180, 340], v), 0.1, kind=F_HP12).amp(pick([0.8, 1.2, 0.5], v), 1.0, 1.0, 2.5, vel=0.1)
-    p.lfo1(L_SIN, hz=0.1, depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.1)
-    p.wide(10.0, 0.5)
-    p.chorus(0.35, 0.45, 0.2).delay("1/4", 0.4, 0.15).verb(0.4, 0.85, 0.35).eq(high=2.0)
-    return p, ["Airy"]
-
-
-def pd_evolving(v, rng):
-    fam = pick(["analog", "bright", "vocal", "wood", "detune", "reed"], v)
-    p = Patch().spread(0.3)
-    p.o1(W_DIG, digital=dig(fam, v), level=0.6).o2(W_SAW, octave=pick([0, -1], v), fine=6, level=0.45)
-    p.filt(pick([1500, 2200, 1100], v), 0.2).amp(pick([1.0, 1.5, 0.7], v), 1.0, 1.0, 2.5, vel=0.1)
-    p.lfo1(pick([L_TRI, L_SIN, L_RND], v), hz=pick([0.08, 0.15, 0.05], v), depth=1.0, key=0)
-    p.mod(1, S_LFO1, D_CUT, 0.15).mod(3, S_LFO1, D_O1SHAPE, 0.5)
-    p.layer(0.5, osc1_digital=dig(fam, v + 3, 1), amp_pan=0.35, osc1_fine=-7)
-    p.t1["amp_pan"] = -0.35
-    p.chorus(0.25, 0.4, 0.15).delay("3/8", 0.45, 0.14).verb(0.35, 0.8, 0.45)
-    return p, ["Evolving", "Digital"]
-
-
-def pd_dark(v, rng):
-    p = Patch().spread(0.4)
-    p.o1(W_SAW, octave=-1, level=0.65).o2(pick([W_SQR, W_SAW], v), octave=-1, fine=-9, level=0.5)
-    p.filt(pick([400, 550, 320, 700], v), pick([0.25, 0.18], v))
-    p.amp(pick([0.8, 1.2], v), 1.0, 1.0, 2.5, vel=0.1)
-    p.lfo1(L_SIN, hz=pick([0.07, 0.11], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.1)
-    p.layer(0.45, osc1_octave=0, osc2_octave=0, filter_cutoff=cut(pick([900, 1200], v)), amp_pan=0.25)
-    p.chorus(0.2, 0.3, 0.15, kind=3).verb(0.35, 0.85, 0.65)
-    return p, ["Dark", "Cinematic"]
-
-
-def pd_glass(v, rng):
-    p = Patch().spread(0.25)
-    p.o1(W_DIG, digital=dig(pick(["bell", "bright", "metal"], v), v), level=0.55)
-    p.o2(W_SIN, octave=1, level=0.35)
-    p.filt(pick([5000, 7000, 3800], v), 0.05).amp(pick([0.4, 0.7], v), 1.2, 0.8, 2.2, vel=0.25)
-    p.wide(6.0, 0.4)
-    p.chorus(0.25, 0.3, 0.2).delay("3/16", 0.4, 0.16).verb(0.35, 0.75, 0.35).eq(high=1.5)
-    return p, ["Glass"]
-
-
-def pd_strings(v, rng):
-    p = Patch().spread(0.3)
-    p.o1(W_SQR, shape=0.2, pwm=pick([0.5, 0.35, 0.6], v), level=0.65).o2(W_SAW, fine=6, level=0.45)
-    p.lfo1(L_TRI, hz=pick([0.6, 0.9, 0.4], v), depth=1.0, key=0)
-    p.filt(pick([2400, 3200, 1800], v), 0.05).amp(pick([0.35, 0.5, 0.25], v), 1.0, 1.0, 1.2, vel=0.3)
-    p.lfo2(L_SIN, 5.0).sh["voice_vib"] = 0.4
-    p.wide(5.0, 0.35).chorus(0.4, 0.45, 0.22).verb(0.3, 0.7, 0.55)
-    return p, ["Strings"]
-
-
-# ============================== PLUCK
-def pl_future(v, rng):
-    p = Patch().spread(pick([0.6, 0.75, 0.5], v))
-    p.o1(W_SAW, level=0.65).o2(W_SAW, octave=pick([0, 1], v), fine=10, level=0.5)
-    p.filt(pick([600, 800, 450], v), 0.15).fenv(0.0, pick([0.25, 0.35, 0.2], v), 0.05, 0.3, amt=0.5)
-    p.amp(0.0, pick([0.5, 0.7, 0.4], v), 0.0, 0.4, vel=0.35)
-    p.wide(9.0, 0.4).chorus(0.25, 0.35, 0.25).delay(pick(["3/16", "1/8"], v), 0.35, 0.2).verb(0.25, 0.65)
-    return p, ["Future", "Chord"]
-
-
-def pl_mallet(v, rng):
-    p = Patch()
-    p.o1(pick([W_SIN, W_TRI, W_SIN], v), level=0.85).o2(W_SIN, octave=pick([2, 1, 2], v), level=0.0)
-    p.t1["fm_amt"] = pick([0.12, 0.2, 0.08], v)
-    p.filt(5000, 0.0).amp(0.0, pick([0.4, 0.6, 0.3], v), 0.0, 0.4, vel=0.5)
-    p.chorus(0.15, 0.2, 0.2).verb(0.22, 0.55)
-    if v % 2:
-        p.delay("1/8", 0.25, 0.12)
-    return p, ["Mallet"]
-
-
-def pl_deep(v, rng):
-    p = Patch().spread(0.2)
-    p.o1(pick([W_SQR, W_SAW], v), shape=0.2, level=0.7).o2(W_SAW, fine=-7, level=0.5)
-    p.filt(pick([450, 650, 350], v), pick([0.3, 0.2], v)).fenv(0.0, pick([0.3, 0.45], v), 0.15, 0.3, amt=0.35)
-    p.amp(0.0, 0.6, 0.2, 0.35, vel=0.4)
-    p.chorus(0.25, 0.3, 0.2).delay("3/16", 0.4, 0.22).verb(0.25, 0.6, 0.6)
-    p.sh["song_tempo"] = 122.0
-    return p, ["Deep", "House"]
-
-
-def pl_kalimba(v, rng):
-    p = Patch()
-    p.o1(W_DIG, digital=dig(pick(["wood", "bell", "wood"], v), v), level=0.75).o2(W_SIN, octave=1, level=0.3)
-    p.filt(pick([3500, 5000, 2600], v), 0.05).amp(0.0, pick([0.35, 0.5, 0.25], v), 0.0, 0.35, vel=0.5)
-    p.delay("1/8", 0.25, 0.15).verb(0.2, 0.5)
-    return p, ["Wood"]
-
-
-def pl_harp(v, rng):
-    p = Patch()
-    p.o1(pick([W_SAW, W_TRI, W_SQR], v), level=0.7).o2(W_SAW, fine=5, level=0.3, octave=pick([0, 1], v))
-    p.filt(pick([1500, 2200, 1100], v), 0.1).fenv(0.0, pick([0.4, 0.6], v), 0.0, 0.5, amt=0.35)
-    p.amp(0.0, pick([0.9, 1.3, 0.7], v), 0.0, 0.8, vel=0.45)
-    p.chorus(0.2, 0.25, 0.2).verb(0.3, 0.7)
-    return p, ["Harp" if v % 2 else "String"]
-
-
-# ============================== KEYS
-def k_ep(v, rng):
-    p = Patch()
-    p.o1(W_SIN, level=0.85).o2(W_SIN, octave=pick([1, 2, 1], v), level=0.0)
-    p.t1["fm_amt"] = pick([0.18, 0.24, 0.12, 0.3], v)
-    p.o2(W_SIN, octave=pick([1, 2, 1], v), level=pick([0.0, 0.1], v))
-    p.filt(pick([3500, 2600, 4500], v), 0.0).amp(0.0, pick([1.5, 2.2, 1.1], v), 0.25, 0.4, vel=0.6)
-    p.mod(4, S_VEL, D_CUT, 0.2)
-    p.chorus(pick([0.3, 0.2, 0.4], v), 0.35, pick([0.3, 0.45], v), kind=pick([1, 3], v // 3))
-    p.verb(0.18, 0.5)
-    if v % 3 == 2:
-        p.sat(0.3, 0.5, tube=True)
-    return p, ["EP"]
-
-
-def k_organ(v, rng):
-    p = Patch()
-    p.o1(pick([W_SIN, W_SQR, W_SIN], v), level=0.75).o2(W_SIN, octave=1, level=0.55)
-    if v % 3 == 1:
-        p.o2(W_SIN, octave=1, pitch=7, level=0.4)
-    p.filt(pick([4000, 2800, 5000], v), 0.0).amp(0.002, 0.2, 1.0, 0.08, vel=0.1)
-    p.chorus(0.35, 0.4, pick([0.55, 0.35], v), kind=pick([1, 3], v))
-    if v % 2:
-        p.drive(0.25, 0.35)
-    p.verb(0.12, 0.45)
-    p.sh["song_tempo"] = 122.0
-    return p, ["Organ"]
-
-
-def k_stab(v, rng):
-    p = Patch().spread(0.3)
-    p.o1(W_SAW, level=0.85).o2(pick([W_SQR, W_SAW], v), fine=6, level=0.65)
-    p.filt(pick([1800, 2600, 1300], v), 0.15).fenv(0.0, 0.25, 0.0, 0.15, amt=0.3)
-    p.amp(0.0, pick([0.45, 0.6, 0.35], v), pick([0.0, 0.25], v), 0.2, vel=0.4)
-    p.chorus(0.25, 0.3, 0.25).delay("1/8", 0.3, 0.15).verb(0.15, 0.5)
-    return p, ["Chord", "Stab"]
-
-
-def k_clav(v, rng):
-    p = Patch()
-    p.o1(pick([W_SQR, W_DIG], v), shape=0.55, digital=dig("reed", v), level=0.95).o2(W_SAW, octave=1, level=0.4)
-    p.filt(pick([2400, 3200], v), 0.3, kind=F_LP12).fenv(0.0, 0.15, 0.1, 0.1, amt=0.35)
-    p.amp(0.0, 0.4, 0.3, 0.1, vel=0.6).chorus(0.2, 0.3, 0.3, kind=3)
-    return p, ["Clav"]
-
-
-# ============================== BELL
-def bl_fm(v, rng):
-    p = Patch()
-    p.o1(W_SIN, level=0.8).o2(W_SIN, octave=pick([2, 1, 2, 1], v), level=pick([0.0, 0.0, 0.12], v))
-    p.t1["fm_amt"] = pick([0.34, 0.24, 0.42, 0.3, 0.5], v)
-    p.filt(8000, 0.0).amp(0.0, pick([2.5, 3.5, 1.8], v), 0.0, 2.0, vel=0.5)
-    p.chorus(0.2, 0.25, 0.15).delay("3/16", 0.35, 0.14).verb(0.3, 0.75, 0.35)
-    return p, ["FM"]
-
-
-def bl_digital(v, rng):
-    p = Patch()
-    p.o1(W_DIG, digital=dig(pick(["bell", "metal", "bell", "bright"], v), v, v % 2), level=0.75)
-    p.o2(W_SIN, octave=2, level=0.2)
-    p.filt(9000, 0.0).amp(0.0, pick([2.0, 2.8, 1.5], v), 0.0, 1.6, vel=0.45)
-    p.wide(5.0, 0.3).delay("1/4", 0.35, 0.14).verb(0.3, 0.7, 0.35)
-    return p, ["Digital"]
-
-
-# ============================== ARP / SEQUENCE
-def a_arp(v, rng):
-    src = v % 6
-    p = Patch()
-    if src == 0:        # supersaw trance arp
-        p.spread(0.6).o1(W_SAW, level=0.65).o2(W_SAW, fine=10, level=0.5).filt(2600, 0.15)
-        p.fenv(0.0, 0.18, 0.2, 0.1, amt=0.35).amp(0.0, 0.25, 0.5, 0.15)
-        p.delay("3/16", 0.35, 0.2).verb(0.2, 0.6)
-        tempo, tags = 138.0, ["Trance"]
-    elif src == 1:      # square bleeps
-        p.o1(W_SQR, shape=0.3, level=0.75).filt(4000, 0.05).amp(0.0, 0.15, 0.3, 0.1)
-        p.delay("1/8", 0.3, 0.15)
-        tempo, tags = 124.0, ["Square"]
-    elif src == 2:      # digital sparkle
-        p.o1(W_DIG, digital=dig(pick(["bell", "bright"], v), v), level=0.75).o2(W_SIN, octave=1, level=0.25)
-        p.filt(7000).amp(0.0, 0.3, 0.0, 0.25, vel=0.3).delay("3/16", 0.4, 0.2).verb(0.25, 0.65)
-        tempo, tags = 120.0, ["Digital"]
-    elif src == 3:      # resonant pluck
-        p.o1(W_SAW, level=0.75).filt(500, 0.45).fenv(0.0, 0.14, 0.0, 0.1, amt=0.45)
-        p.amp(0.0, 0.2, 0.2, 0.1).delay("1/8", 0.3, 0.12)
-        tempo, tags = 128.0, ["Pluck"]
-    elif src == 4:      # soft sine / FM ripples
-        p.o1(W_SIN, level=0.85).o2(W_SIN, octave=1, level=0.0)
-        p.t1["fm_amt"] = 0.15
-        p.amp(0.0, 0.35, 0.0, 0.3, vel=0.3).chorus(0.2, 0.25, 0.2).delay("1/4", 0.4, 0.2).verb(0.3, 0.7)
-        tempo, tags = 110.0, ["Soft"]
-    else:               # synthwave saw arp
-        p.o1(W_SAW, level=0.7).o2(W_SQR, octave=-1, level=0.4).filt(1400, 0.2)
-        p.fenv(0.0, 0.2, 0.2, 0.1, amt=0.3).amp(0.0, 0.25, 0.4, 0.12).chorus(0.25, 0.35, 0.2)
-        p.delay("3/16", 0.35, 0.15).verb(0.15, 0.55)
-        tempo, tags = 100.0, ["Retro"]
-    p.arp(rate=pick(["1/16", "1/16", "1/8", "1/16T", "1/16"], v // 6), mode=pick([ARP_UP, ARP_ALT1, ARP_UP, ARP_DOWN, ARP_ALT2, ARP_RND], v),
-          gate=pick([0.5, 0.65, 0.4], v), octaves=pick([1, 2, 2, 1, 3], v // 2), tempo=tempo)
-    return p, tags
-
-
-SEQ_STEPS = ["xx.xx.x.", "x.xx.xx.", "x..x..x.", "xxx.xx.x", "x.x.xxx.", "x..xx.x.", "xx.x.xx.", "x.xxx..x"]
-
-
-def s_seq(v, rng):
-    p = Patch()
-    if v % 3 == 0:       # bass sequence
-        p.mono(t2=False).o1(W_SAW, octave=-1, level=0.8).o2(W_SQR, octave=-1, fine=5, level=0.5)
-        p.filt(280, 0.35).fenv(0.0, 0.15, 0.0, 0.1, amt=0.45).amp(0.0, 0.2, 0.3, 0.08)
-        tags = ["Bass"]
-    elif v % 3 == 1:     # chord pulse
-        p.spread(0.4).o1(W_SAW, level=0.7).o2(W_SAW, fine=8, level=0.5).filt(1200, 0.2)
-        p.fenv(0.0, 0.15, 0.1, 0.1, amt=0.3).amp(0.0, 0.2, 0.3, 0.1).chorus(0.25, 0.3, 0.2).verb(0.18, 0.6)
-        tags = ["Chord"]
-    else:                # plucky bleep
-        p.o1(W_SQR, shape=0.25, level=0.75).filt(2200, 0.25).fenv(0.0, 0.1, 0.0, 0.1, amt=0.3)
-        p.amp(0.0, 0.15, 0.1, 0.1).delay("3/16", 0.35, 0.18)
-        tags = ["Bleep"]
-    p.arp(rate=pick(["1/16", "1/16", "1/8"], v), mode=ARP_TRIG if v % 3 != 2 else pick([ARP_UP, ARP_ALT1], v),
-          gate=pick([0.45, 0.6, 0.35], v), octaves=1, tempo=pick([124.0, 128.0, 122.0, 132.0], v),
-          swing=pick([0.0, 0.2, 0.0, 0.35], v), steps=pick(SEQ_STEPS, v))
-    return p, tags
-
-
-# ============================== BRASS / CHOIR
-def br_synth(v, rng):
-    p = Patch().spread(0.3)
-    p.o1(W_SAW, level=0.7).o2(W_SAW, fine=8, level=0.55)
-    p.filt(pick([800, 1100, 650], v), 0.12).fenv(pick([0.04, 0.08, 0.02], v), pick([0.5, 0.8], v), 0.45, 0.3,
-                                                  amt=pick([0.35, 0.28, 0.42], v))
-    p.amp(pick([0.03, 0.06, 0.015], v), 0.5, 0.9, 0.35, vel=0.4).mod(4, S_VEL, D_CUT, 0.15)
-    p.chorus(0.25, 0.3, 0.2).verb(0.18, 0.6)
-    if v % 3 == 2:
-        p.wide(7.0, 0.3)
-    return p, ["Synth Brass"]
-
-
-def ch_vocal(v, rng):
-    p = Patch().spread(0.3)
-    p.o1(W_DIG, digital=dig("vocal", v, v % 2), level=0.85).o2(W_DIG, digital=dig("vocal", v + 2), fine=7, level=0.6)
-    p.filt(pick([3000, 2200, 4000], v), 0.1).amp(pick([0.4, 0.7, 0.25], v), 1.0, 1.0, 1.6, vel=0.2)
-    p.lfo2(L_SIN, 4.8).sh["voice_vib"] = 0.4
-    p.wide(8.0, 0.4).chorus(0.35, 0.45, 0.2).verb(0.35, 0.8, 0.5)
-    return p, ["Vocal"]
-
-
-# ============================== HIT / SFX
-def h_stab(v, rng):
-    p = Patch().spread(pick([0.5, 0.3], v))
-    kind = v % 3
-    if kind == 0:        # rave chord stab: fifth + octave
-        p.o1(W_SAW, level=0.65).o2(W_SAW, pitch=7, level=0.5)
-        tags = ["Rave"]
-    elif kind == 1:      # sus house stab: a fourth or fifth on top
-        p.o1(W_SAW, level=0.65).o2(W_SQR, pitch=pick([5, 7], v), level=0.45)
-        tags = ["House"]
-    else:                # noise-edged hit
-        p.o1(W_SAW, level=0.65).o2(W_SAW, octave=-1, level=0.5).noise(0.15)
-        tags = ["Impact"]
-    p.filt(pick([2200, 3200, 1600], v), 0.2).fenv(0.0, 0.25, 0.0, 0.2, amt=0.35)
-    p.amp(0.0, pick([0.35, 0.5, 0.25], v), 0.0, 0.3, vel=0.3)
-    p.chorus(0.2, 0.3, 0.2).delay("1/8", 0.3, 0.14).verb(0.25, 0.65)
-    if v % 4 == 3:
-        p.drive(0.3, 0.35)
-    return p, ["Stab"] + tags
-
-
-def x_sfx(v, rng):
-    p = Patch()
-    kind = v % 4
-    if kind == 0:        # riser: pitch and filter climb while held
+def sfx_design(p, kind, r):
+    if kind == 0:
         p.o1(W_SAW, level=0.6).noise(0.3).filt(400, 0.3, key=0.0)
-        p.fenv(pick([3.0, 4.0], v), 0.5, 1.0, 1.0, amt=0.6).mod(2, S_ENV1, D_PITCH, 0.6)
-        p.amp(1.5, 1.0, 1.0, 1.0).verb(0.3, 0.8)
-        tags = ["Riser"]
-    elif kind == 1:      # zap / laser
-        p.o1(W_SQR, shape=0.3, level=0.75).fenv(0.0, pick([0.12, 0.2], v), 0.0, 0.1)
-        p.mod(2, S_ENV1, D_PITCH, pick([0.9, 0.7], v)).amp(0.0, 0.3, 0.0, 0.2).delay("1/8", 0.35, 0.2)
-        tags = ["Zap"]
-    elif kind == 2:      # noise sweep
+        p.fenv(r.choice([3.0, 4.0]), 0.5, 1.0, 1.0, amt=0.6).mod(2, S_ENV1, D_PITCH, 0.6).amp(1.5, 1.0, 1.0, 1.0)
+        return "Riser", ["Riser"]
+    if kind == 1:
+        p.o1(W_SQR, shape=0.3, level=0.75).fenv(0.0, r.choice([0.12, 0.2]), 0.0, 0.1)
+        p.mod(2, S_ENV1, D_PITCH, r.uniform(0.6, 0.9)).amp(0.0, 0.3, 0.0, 0.2)
+        return "Zap", ["Zap"]
+    if kind == 2:
         p.o1(W_NOI, level=0.0).noise(0.7).filt(800, 0.55, kind=F_BP12, key=0.0)
-        p.lfo1(L_TRI, sync=pick(["1/1", "1/2"], v), depth=1.0, key=1).mod(1, S_LFO1, D_CUT, 0.6)
-        p.amp(0.3, 1.0, 1.0, 1.0).verb(0.35, 0.8).delay("1/4", 0.4, 0.2)
-        tags = ["Sweep"]
-    else:                # downlifter
-        # ENV1 falls from full to zero: the pitch starts 6 semitones up and sinks
+        p.lfo1(L_TRI, sync=r.choice(["1/1", "1/2"]), depth=1.0, key=1).mod(1, S_LFO1, D_CUT, 0.6).amp(0.3, 1.0, 1.0, 1.0)
+        return "Sweep", ["Sweep"]
+    if kind == 3:
         p.o1(W_SAW, octave=-1, level=0.6).o2(W_SAW, octave=-1, fine=12, level=0.5).filt(5000, 0.2, key=0.0)
-        p.fenv(0.0, pick([2.5, 3.5], v), 0.0, 1.0).mod(2, S_ENV1, D_PITCH, 0.5)
-        p.amp(0.0, 3.0, 0.0, 1.0).verb(0.3, 0.8)
-        tags = ["Downlifter"]
-    return p, tags
+        p.fenv(0.0, r.choice([2.5, 3.5]), 0.0, 1.0).mod(2, S_ENV1, D_PITCH, 0.5).amp(0.0, 3.0, 0.0, 1.0)
+        return "Downlifter", ["Downlifter"]
+    if kind == 4:      # laser: fast pitch dive with ring mod
+        p.o1(W_SAW, level=0.6).o2(W_SQR, octave=1, level=0.5).t1["osc_mod"] = 1
+        p.fenv(0.0, 0.15, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, 0.8).amp(0.0, 0.25, 0.0, 0.2)
+        return "Laser", ["Zap"]
+    if kind == 5:      # alarm: square pitch swinging on a synced LFO
+        p.o1(W_SQR, level=0.7).lfo1(L_SQR, sync="1/8", depth=1.0, key=1).mod(1, S_LFO1, D_PITCH, 0.08).amp(0.0, 0.3, 1.0, 0.3)
+        return "Alarm", ["Siren"]
+    if kind == 6:      # metallic drone with slow sweep
+        p.o1(W_DIG, digital=dig("metal", r.randrange(8), 1), level=0.7).o2(W_SAW, fine=11, level=0.5)
+        p.filt(900, 0.5, kind=F_BP12).lfo1(L_SIN, hz=0.1, depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.35).amp(1.0, 1.0, 1.0, 2.0)
+        return "Drone", ["Drone"]
+    # stepped noise texture
+    p.o1(W_NOI, level=0.0).noise(0.6).filt(1500, 0.6, kind=F_BP12, key=0.0)
+    p.lfo1(L_RND, sync="1/16", depth=1.0, key=1).mod(1, S_LFO1, D_CUT, 0.5).amp(0.0, 1.0, 1.0, 0.5)
+    return "Glitch", ["Glitch"]
 
 
-# ---------------------------------------------------------------- bank plan
-# (category, recipe, count, name words) -> 400 presets
-ADJ = {
-    "Bass": ["Deep", "Heavy", "Rubber", "Midnight", "Concrete", "Velvet", "Pressure", "Basement", "Low", "Thick",
-             "Iron", "Smoky", "Tight", "Round", "Warm", "Gritty", "Neon", "Night", "Dusty", "Solid", "Hollow",
-             "Steel", "Liquid", "Shadow", "Bold", "Muddy", "Punchy", "Dark", "Brick", "Underground"],
-    "Lead": ["Bright", "Silver", "Laser", "Soaring", "Golden", "Crystal", "Electric", "Neon", "Prism", "Comet",
-             "Signal", "Vivid", "Wild", "Hyper", "Shiny", "Clear", "Rising", "Polar", "Sonic", "Turbo"],
-    "Pad": ["Endless", "Soft", "Distant", "Floating", "Velvet", "Frozen", "Golden", "Hazy", "Slow", "Wide",
-            "Quiet", "Ocean", "Northern", "Dusk", "Dawn", "Misty", "Silk", "Calm", "Deep", "Faded"],
-    "Pluck": ["Bouncy", "Glassy", "Bright", "Tiny", "Sunny", "Crisp", "Candy", "Soft", "Quick", "Spark",
-              "Wooden", "Pastel", "Lucky", "Fresh", "Happy", "Late"],
-    "Keys": ["Warm", "Vintage", "Mellow", "Smooth", "Sunday", "Lounge", "Gospel", "Late Night", "Basement",
-             "Soulful", "Classic", "Bright", "Dusty", "Dreamy"],
-    "Bell": ["Crystal", "Glass", "Temple", "Silver", "Winter", "Bright", "Distant", "Chime", "Starry", "Clear"],
-    "Arp": ["Running", "Spinning", "Rolling", "Cascading", "Twinkling", "Racing", "Bubbling", "Climbing",
-            "Spiral", "Looping", "Flowing", "Dancing"],
-    "Sequence": ["Groove", "Motion", "Pulse", "Machine", "Engine", "Tracker", "Shuffle", "Step"],
-    "Brass": ["Bold", "Royal", "Brassy", "Bright", "Big", "Wide", "Fat", "Golden"],
-    "Choir": ["Angel", "Ghost", "Distant", "Soft", "Glass", "Cathedral"],
-    "Hit": ["Big", "Sharp", "Hard", "Wide", "Short", "Loud", "Club", "Massive", "Dirty"],
+# ---------------------------------------------------------------- assembly
+AXIS_ORDER = ["design", "source", "filter", "pattern", "motion", "layer", "fx"]
+BASE_OCT = {"Bass": -1, "Lead": 0, "Pad": 0, "Pluck": 0, "Keys": 0, "Bell": 0, "Arp": 0, "Sequence": 0,
+            "Brass": 0, "Choir": 0, "Hit": 0, "SFX": 0}
+
+
+def make_candidate(arch, v, k):
+    """Candidate k of slot v: one option per axis, all seeded so the bank is reproducible."""
+    r = random.Random(f"nanofrog-design-{arch.noun}-{v}-{k}")
+    choice = {}
+    for ax, opts in arch.axes.items():
+        if v == 0 and arch.first and ax in arch.first:
+            choice[ax] = arch.first[ax]
+        else:
+            choice[ax] = r.randrange(len(opts))
+    p = Patch()
+    arch.core(p, r)
+    o = BASE_OCT[arch.cat]
+    words, tags, own = [], list(arch.tags), None
+    for ax in AXIS_ORDER:
+        if ax not in arch.axes:
+            continue
+        opt = arch.axes[ax][choice[ax]]
+        res = opt.fn(p, o, r)
+        if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], str):
+            own, extra = res
+            tags += extra
+        tags += opt.tags
+        if opt.word and ax in arch.words:
+            words.append(opt.word)
+    # quiet sources (sparse digital waves): more level into the mixer
+    for t in (p.t1, p.t2):
+        if t is not None and arch.boost != 1.0:
+            t["mix_o1"] = min(1.0, t["mix_o1"] * arch.boost)
+            t["mix_o2"] = min(1.0, t["mix_o2"] * arch.boost)
+    # a band-pass on a (near-)sine has nothing to pass: use a low-pass there
+    for t in (p.t1, p.t2):
+        if t is not None and t["filter_type"] == F_BP12 and t["osc1_wave"] in (W_SIN, W_TRI):
+            t["filter_type"] = F_LP12
+            t["filter_cutoff"] = min(1.0, t["filter_cutoff"] + 0.11)   # ~2x the frequency
+            words = [w for w in words if w not in ("Hollow", "Ringing", "Wah", "Vowel", "Talking", "Formant", "Nasal")]
+    tags = [t for i, t in enumerate(tags) if t and t not in tags[:i]]
+    return p, tags, words, own, choice
+
+
+def candidate_name(arch, words, own, used, v):
+    noun = own or arch.noun
+    tries = []
+    for w in words:
+        if w and w not in noun:
+            tries.append(f"{w} {noun}")
+    for a in range(len(words)):
+        for b in range(a + 1, len(words)):
+            if words[a] and words[b] and words[a] != words[b]:
+                tries.append(f"{words[a]} {words[b]} {noun}")
+    tries.append(noun)
+    for t in tries:
+        if t not in used:
+            return t
+    adj = ADJ[arch.cat]
+    for i in range(len(adj) * 4):
+        t = f"{adj[(v + i) % len(adj)]} {(words[0] + ' ') if words else ''}{noun}"
+        if t not in used:
+            return t
+    raise AssertionError(noun)
+
+
+ADJ = {c: w for c, w in {
+    "Bass": ["Deep", "Heavy", "Midnight", "Concrete", "Velvet", "Basement", "Low", "Thick", "Iron", "Smoky", "Tight", "Night", "Solid", "Steel", "Liquid", "Shadow"],
+    "Lead": ["Silver", "Laser", "Soaring", "Golden", "Crystal", "Electric", "Neon", "Prism", "Comet", "Signal", "Vivid", "Hyper", "Polar", "Sonic"],
+    "Pad": ["Endless", "Distant", "Floating", "Frozen", "Golden", "Hazy", "Slow", "Quiet", "Ocean", "Northern", "Dusk", "Dawn", "Misty", "Silk", "Calm"],
+    "Pluck": ["Bouncy", "Tiny", "Sunny", "Crisp", "Candy", "Quick", "Spark", "Pastel", "Lucky", "Fresh", "Happy", "Late"],
+    "Keys": ["Vintage", "Smooth", "Sunday", "Lounge", "Gospel", "Late Night", "Soulful", "Classic", "Dusty", "Dreamy"],
+    "Bell": ["Crystal", "Temple", "Silver", "Winter", "Distant", "Starry", "Clear", "Tiny"],
+    "Arp": ["Running", "Spinning", "Rolling", "Cascading", "Twinkling", "Racing", "Bubbling", "Climbing", "Spiral", "Looping", "Flowing", "Dancing"],
+    "Sequence": ["Groove", "Motion", "Machine", "Engine", "Tracker", "Shuffle", "Step", "Loop"],
+    "Brass": ["Royal", "Big", "Fat", "Golden", "Grand", "Heroic"],
+    "Choir": ["Angel", "Ghost", "Distant", "Cathedral", "Glass", "Hollow"],
+    "Hit": ["Big", "Sharp", "Hard", "Short", "Loud", "Club", "Massive"],
     "SFX": ["Rocket", "Space", "Static", "Storm", "Orbit", "Signal", "Vapor", "Falling"],
-}
+}.items()}
 
-PLAN = [
-    # Bass 84
-    ("Bass", b_808, 10, ["808", "Boom", "Kick Sub", "Trap Sub"]),
-    ("Bass", b_sub, 8, ["Sub", "Sub Line", "Floor"]),
-    ("Bass", b_reese, 10, ["Reese", "Reese Line", "Roller"]),
-    ("Bass", b_growl, 8, ["Growl", "Snarl", "Beast"]),
-    ("Bass", b_wobble, 8, ["Wobble", "Wub", "Wobble Line"]),
-    ("Bass", b_pluck, 10, ["Pluck Bass", "Bounce", "Slap"]),
-    ("Bass", b_house, 8, ["House Bass", "Organ Bass", "Groove Bass"]),
-    ("Bass", b_analog, 10, ["Mono Bass", "Synth Bass", "Drive Bass"]),
-    ("Bass", b_acid, 6, ["Acid", "Squelch", "Acid Line"]),
-    ("Bass", b_fm, 6, ["FM Bass", "Tine Bass", "Knock Bass"]),
-    # Lead 56
-    ("Lead", l_supersaw, 10, ["Supersaw", "Anthem Lead", "Saw Lead"]),
-    ("Lead", l_square, 6, ["Square Lead", "Chip Lead", "Pulse Lead"]),
-    ("Lead", l_sync, 7, ["Sync Lead", "Sync Scream", "Tear Lead"]),
-    ("Lead", l_glide, 8, ["Glide Lead", "Portamento", "Slide Lead"]),
-    ("Lead", l_soft, 6, ["Flute", "Whistle", "Soft Lead"]),
-    ("Lead", l_digital, 7, ["Digital Lead", "Talk Lead", "Formant Lead"]),
-    ("Lead", l_rave, 6, ["Rave Lead", "Hover Lead", "Siren"]),
-    ("Lead", l_pluck, 6, ["Pluck Lead", "Hook", "Riff Lead"]),
-    # Pad 56
-    ("Pad", pd_supersaw, 10, ["Supersaw Pad", "Anthem Pad", "Saw Pad"]),
-    ("Pad", pd_warm, 10, ["Warm Pad", "Analog Pad", "Blanket"]),
-    ("Pad", pd_airy, 8, ["Air Pad", "Breath", "Atmosphere"]),
-    ("Pad", pd_evolving, 8, ["Motion Pad", "Drift", "Tides"]),
-    ("Pad", pd_dark, 8, ["Dark Pad", "Abyss", "Undertow"]),
-    ("Pad", pd_glass, 6, ["Glass Pad", "Crystal Pad", "Shimmer"]),
-    ("Pad", pd_strings, 6, ["Strings", "Synth Strings", "Ensemble"]),
-    # Pluck 40
-    ("Pluck", pl_future, 10, ["Future Pluck", "Chord Pluck", "Drop Pluck"]),
-    ("Pluck", pl_mallet, 8, ["Mallet", "Marimba", "Vibes"]),
-    ("Pluck", pl_deep, 8, ["Deep Pluck", "House Pluck", "Dub Chord"]),
-    ("Pluck", pl_kalimba, 6, ["Kalimba", "Thumb Piano", "Wood Pluck"]),
-    ("Pluck", pl_harp, 8, ["Harp", "Synth Guitar", "Koto Pluck"]),
-    # Keys 32
-    ("Keys", k_ep, 10, ["EP", "Electric Piano", "Tine Keys"]),
-    ("Keys", k_organ, 8, ["Organ", "House Organ", "Drawbar"]),
-    ("Keys", k_stab, 8, ["Chord Keys", "Stab Keys", "Poly Keys"]),
-    ("Keys", k_clav, 6, ["Clav", "Funk Keys", "Pluck Keys"]),
-    # Bell 18
-    ("Bell", bl_fm, 10, ["Bell", "FM Bell", "Chime"]),
-    ("Bell", bl_digital, 8, ["Digital Bell", "Music Box", "Glockenspiel"]),
-    # Arp 34, Sequence 18
-    ("Arp", a_arp, 34, ["Arp", "Arpeggio", "Run"]),
-    ("Sequence", s_seq, 18, ["Sequence", "Loop", "Pattern"]),
-    # Brass 16, Choir 12
-    ("Brass", br_synth, 16, ["Brass", "Synth Brass", "Horns"]),
-    ("Choir", ch_vocal, 12, ["Choir", "Voices", "Aahs"]),
-    # Hit 18, SFX 16
-    ("Hit", h_stab, 18, ["Stab", "Hit", "Chord Stab"]),
-    ("SFX", x_sfx, 16, ["Riser", "Zap", "Sweep", "Downlifter"]),
-]
+CANDIDATES = 10
 
 
-def build():
-    presets = [("Init", ["Init"], init_patch().values())]
+def build(choice_map=None, all_candidates=False):
+    """The bank (Init + one candidate per slot), or every candidate (for diversify.py)."""
+    choice_map = choice_map or {}
+    presets = [("Init", ["Init"], init_patch().values(), "init", 0, 0)]
     used = {"Init"}
-    adj_pos = {c: 0 for c in ADJ}
-    for cat, fn, count, nouns in PLAN:
-        for v in range(count):
-            rng = random.Random(f"nanofrog-2026-10-29-{fn.__name__}-{v}")
-            out = fn(v, rng)
-            p, tags = out[0], out[1]
-            own = out[2] if len(out) > 2 else None   # a recipe with distinct designs names them
-            # name: an adjective from the category list + one of the recipe's nouns
-            for _ in range(400):
-                adj = ADJ[cat][adj_pos[cat] % len(ADJ[cat])]
-                adj_pos[cat] += 1
-                noun = own or nouns[(v + adj_pos[cat] // len(ADJ[cat])) % len(nouns)]
-                name = f"{adj} {noun}"
-                if name not in used:
-                    break
-            assert name not in used, name
-            used.add(name)
-            presets.append((name, [cat] + tags, p.values()))
+    assert sum(a.count for a in ARCHES) == 400, sum(a.count for a in ARCHES)
+    for arch in ARCHES:
+        for v in range(arch.count):
+            ks = range(CANDIDATES) if all_candidates else [choice_map.get(f"{arch.noun}/{v}", 0)]
+            for k in ks:
+                p, tags, words, own, _ = make_candidate(arch, v, k)
+                name = candidate_name(arch, words, own, used, v) if not all_candidates else f"{arch.noun} {v} {k}"
+                if not all_candidates:
+                    used.add(name)
+                presets.append((name, [arch.cat] + tags, p.values(), arch.noun, v, k))
     return presets
 
 
@@ -1073,7 +1202,9 @@ def init_patch():
 
 def main():
     import json
-    presets = build()
+    choice_file = ROOT / "Tools" / "bank_choice.json"
+    choice_map = json.loads(choice_file.read_text()) if choice_file.exists() else {}
+    presets = build(choice_map)
     assert len(presets) == 401, len(presets)
     levels_file = ROOT / "Tools" / "bank_levels.json"
     levels = {int(k): v for k, v in json.loads(levels_file.read_text()).items()} \
@@ -1081,7 +1212,7 @@ def main():
     oi = KIDS.index("output_level")
     bank = {"type": "NanoFrogBank", "version": 1, "param_count": len(KIDS),
             "param_ids": KIDS, "presets": []}
-    for i, (name, tags, vals) in enumerate(presets):
+    for i, (name, tags, vals, _, _, _) in enumerate(presets):
         if i in levels:
             vals[oi] = round(levels[i], 4)
         bank["presets"].append({"name": name, "tags": tags, "values": vals})

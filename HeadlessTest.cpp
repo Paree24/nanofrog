@@ -84,7 +84,8 @@ static int dumpFeatures (const char* path)
     int n = PresetBank::count();
     for (int idx = 0; idx < n; ++idx)
     {
-        for (int mut = 0; mut < 2; ++mut)
+        const int nMut = std::getenv ("NANOFROG_DUMP_ORIG_ONLY") != nullptr ? 1 : 2; // skip the MUTATE copy
+        for (int mut = 0; mut < nMut; ++mut)
         {
             auto px = std::make_unique<NanoFrogProcessor>();
             px->prepareToPlay (44100.0, 512);

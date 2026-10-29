@@ -82,9 +82,16 @@ the original.
 
 The factory bank is data, not code: edit `FactoryBank/NanoFrogFactory.json`
 by hand, or regenerate it with `python3 Tools/gen_bank.py` (deterministic).
-Presets are designed, not rolled: each archetype (808, reese, supersaw,
-future pluck, ...) is a recipe in real units (seconds, Hz, cents) and its
-variants pick from lists of settings that suit the sound.
+Each sound type (808, reese, supersaw, future pluck, ...) has a core that
+makes it that sound, plus designed options on five axes: oscillator source
+(saws, pulse, PWM, the digital wave families, sync, FM, ring), filter,
+second-timbre layer (octave, fifth, sub, texture, split, wide), movement
+(drift, tempo-synced LFOs, steps, morph, auto-pan) and effects. A preset
+is one option per axis, so presets of one type differ in what they are
+made of, not by a few knob nudges. `python3 Tools/diversify.py` renders ten
+candidates per slot and keeps, slot by slot, the one that sounds least
+like its siblings (`Tools/bank_choice.json`); names come from the chosen
+options ("Phased Metal Reese", "Sync Brass").
 
 Every factory preset is guaranteed in key: no oscillator sits more than 25
 cents from the played note (or its fourth/fifth/octave), counting fine tune,
@@ -169,6 +176,8 @@ within ~6 dB).
 - `Assets/` — embedded Lato fonts + OFL notice
 - `Tools/gen_bank.py` — deterministic factory-bank generator (reads the
   live parameter order from the sources, so the table can't drift)
+- `Tools/diversify.py` + `Tools/bank_choice.json` — audio-verified choice
+  of each preset's design (renders via the headless test)
 - `Tools/level_bank.py` + `Tools/bank_levels.json` — measured loudness trims
   (renders via the headless test's `NANOFROG_DUMP_PITCH` mode)
 - `HeadlessTest.cpp` — headless regression suite: layout geometry,
