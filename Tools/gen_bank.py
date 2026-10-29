@@ -341,8 +341,12 @@ class Patch:
                 continue
             det = self.sh[pre + "voice_detune"]
             uni = 25.0 * det if self.sh[pre + "voice_poly"] == 1 and det > 0.01 else 0.0
+            # a symmetric detuned pair is heard on its centre pitch: 31 cents each side
+            both = t["osc1_level"] * t["mix_o1"] > 0 and t["osc2_level"] * t["mix_o2"] > 0 \
+                and t["osc1_pitch"] == 0 and t["osc2_pitch"] == 0 and t["osc1_octave"] == t["osc2_octave"]
+            sym = both and abs((t["osc1_fine"] - 15.0 * det) + (t["osc2_fine"] + 15.0 * det)) <= 4.0
             for o, sign in (("osc1", -15.0), ("osc2", 15.0)):
-                room = max(0.0, limit - uni)
+                room = max(0.0, (31.0 if sym else limit) - uni)
                 spread = sign * det
                 t[o + "_fine"] = min(room - spread, max(-room - spread, t[o + "_fine"]))
 
@@ -693,19 +697,30 @@ def first_808_clean(p, r):
     """the first 808: pure sine, no FX, no LFO, no mods (the self-test checks MUTATE keeps it asleep)"""
 
 
-def reese_stack(cents, word, uni=0.0, pulse=False):
-    """Two saws detuned +-cents/2 (slow phasing .. rough beating); uni > 0 stacks
-    four voices of them, spread over `uni` cents."""
+def reese_stack(cents, word, uni=0.0, wave2=W_SAW, wave1=W_SAW, pwm=False):
+    """A detuned pair, `cents` apart in total (+-cents/2 each side: 20 .. 60 c,
+    as reeses are made); uni > 0 stacks four voices of it over `uni` cents.
+    pwm: osc1 is a pulse whose width LFO1 moves (the pulse-reese variant)."""
     def f(p, o, r):
-        d = cents * r.uniform(0.85, 1.15) / 2.0
-        p.o1(W_SAW, octave=o, fine=-d, level=0.72)
-        if pulse:
-            p.o2(W_SQR, octave=o, fine=d, shape=r.uniform(0.25, 0.4), level=0.62)
-        else:
-            p.o2(W_SAW, octave=o, fine=d, level=0.68)
+        d = cents * r.uniform(0.9, 1.1) / 2.0
+        p.o1(wave1, octave=o, fine=-d, level=0.72, shape=0.4 if wave1 == W_SQR else 0.0)
+        p.o2(wave2, octave=o, fine=d, level=0.68, shape=0.3 if wave2 == W_SQR else 0.0)
+        if pwm:
+            p.t1["osc1_pwm"] = r.uniform(0.5, 0.75)
+            p.lfo1(L_TRI, hz=r.uniform(0.6, 3.2), depth=1.0, key=0)
         if uni:
             p.unison(uni)
-    return Opt(word, f, ["Saw"] + (["Unison"] if uni else []))
+    return Opt(word, f, ["Saw"] + (["Unison"] if uni else []) + (["PWM"] if pwm else []))
+
+
+def reese_breath(p, r, depth=(0.014, 0.024), hz=(0.07, 0.3)):
+    """Natural movement: a slow free-running LFO pushes the two oscillators
+    apart and together (osc2 up, both down by half: the centre pitch stays),
+    so the beating speeds up and slows down and no two notes beat alike."""
+    a = r.uniform(*depth)
+    p.lfo2(L_TRI, hz=r.uniform(*hz), depth=1.0, key=0)
+    p.mod(3, S_LFO2, D_O2PITCH, a).mod(2, S_LFO2, D_PITCH, -a / 2.0)
+    p.sh["voice_vib"] = 0.0
 
 
 def reese_sub():
@@ -715,7 +730,8 @@ def reese_sub():
         # timbre 2: a clean sine on the fundamental, so the low end stays solid while the saws beat
         p.layer(r.uniform(0.38, 0.46), osc1_wave=W_SIN, osc1_octave=p.t1["osc1_octave"], osc1_fine=0.0,
                 mix_o1=0.9, mix_o2=0.0, osc2_level=0.0, filter_type=F_LP24, filter_cutoff=cut(300), filter_reso=0.0,
-                filter_envamt=0.0, mod1_amt=0.0, amp_pan=0.0)
+                filter_envamt=0.0, amp_pan=0.0, fm_amt=0.0, osc_mod=0, osc1_shape=0.0, osc1_pwm=0.0,
+                mod1_amt=0.0, mod2_amt=0.0, mod3_amt=0.0, mod4_amt=0.0, mix_noise=0.0)   # a plain, steady sine
         # one centred voice, even when timbre 1 is a unison stack
         p.sh.update(t2_voice_assign=1, t2_voice_poly=1, t2_voice_detune=0.0, t2_voice_unidet=0.0)
     return Opt(None, f, ["Sub"])
@@ -730,92 +746,86 @@ def reese_octave():
     return Opt("Deep", f, ["Layer"])
 
 
-# growls: the vowel-like movement is shaped per note by ENV1 (up and back,
-# opening, ratio / sync / ring sweeps, wave morph). No steady LFO sweep:
-# that would be a wobble. LFO1 only adds fast random grit; the mod wheel
-# opens the tone for performance.
-def _grit(p, r, amt=(0.04, 0.08)):
-    p.lfo1(L_RND, hz=r.uniform(14.0, 22.0), depth=1.0, key=2).mod(1, S_LFO1, D_CUT, r.uniform(*amt))
-
-
-def growl_yoy(p, o, r):
-    # a resonant band-pass swept up and back down by ENV1: "yoy"
-    p.o1(W_SAW, octave=o, fine=-6, level=0.75).o2(W_SQR, octave=o, fine=6, shape=0.3, level=0.6)
-    p.filt(r.uniform(300, 420), r.uniform(0.6, 0.72), kind=F_BP12, key=0.4)
-    p.fenv(r.uniform(0.08, 0.14), r.uniform(0.25, 0.35), 0.15, 0.15, amt=r.uniform(0.3, 0.38))
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_CUT, 0.3)
-
-
-def growl_wow(p, o, r):
-    # a low-pass with heavy resonance opening slowly: "wow"
-    p.o1(W_SAW, octave=o, level=0.75).o2(W_SAW, octave=o, fine=9, level=0.65)
-    p.filt(r.uniform(150, 220), r.uniform(0.6, 0.7), kind=F_LP24, key=0.4)
-    p.fenv(r.uniform(0.18, 0.3), 0.6, 0.6, 0.2, amt=r.uniform(0.35, 0.45))
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_CUT, 0.3)
+# growls: one LFO, tempo-synced and restarted by every note, moves the
+# TIMBRE - FM ratio, sync or ring pitch, pulse width / saw morph - and a
+# band-pass "formant" (both timbres can be two formants) together, through
+# heavy drive. A wobble only moves a low-pass cutoff; a growl changes vowel.
+def _growl_lfo(p, r, divs, wave=None):
+    p.lfo1(wave if wave is not None else r.choice([L_SIN, L_TRI]), sync=r.choice(divs), depth=1.0, key=2)
+    p.mod(4, S_WHEEL, D_L1RATE, 0.6)        # mod wheel: faster talking
 
 
 def growl_fm(p, o, r):
-    # FM whose ratio is swept by ENV1, settling back on the octave: metallic vowels
+    # FM whose ratio the LFO swings (osc2 pitch) while a band-pass formant moves against it
     p.o1(W_SAW, octave=o, level=0.8).o2(W_SIN, octave=o + 1, level=0.0)
-    p.t1["osc2_level"] = 1.0
-    p.t1["fm_amt"] = r.uniform(0.35, 0.5)
-    p.fenv(r.uniform(0.04, 0.08), r.uniform(0.35, 0.5), 0.0, 0.2, amt=0.3).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.6, 0.9))
-    p.filt(r.uniform(450, 700), 0.45, kind=F_LP24)
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_O2PITCH, 0.25)
-
-
-def growl_ring(p, o, r):
-    # ring mod against a square whose pitch dives with ENV1: grinding metal
-    p.o1(W_SAW, octave=o, level=0.7).o2(W_SQR, octave=o + 1, level=0.6)
-    p.t1["osc_mod"] = 1
-    p.fenv(0.0, r.uniform(0.35, 0.55), 0.0, 0.2).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.3, 0.5))
-    p.filt(r.uniform(900, 1400), 0.45, kind=F_LP12)
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_O2PITCH, 0.2)
+    p.t1.update(osc2_level=1.0, fm_amt=r.uniform(0.55, 0.7))
+    p.filt(r.uniform(600, 900), r.uniform(0.45, 0.55), kind=F_BP12, key=0.4)
+    _growl_lfo(p, r, ("1/4", "1/8", "3/16"))
+    p.mod(3, S_LFO1, D_O2PITCH, r.uniform(0.6, 0.85)).mod(1, S_LFO1, D_CUT, -r.uniform(0.35, 0.45))
 
 
 def growl_sync(p, o, r):
-    # hard sync swept by ENV1: a screaming tear that settles
-    p.o1(W_SAW, octave=o, level=0.4).o2(W_SAW, octave=o, pitch=12, level=0.8)
+    # hard sync torn open and shut by the LFO: a ripping growl
+    p.o1(W_SAW, octave=o, level=0.35).o2(W_SAW, octave=o, pitch=12, level=0.8)
     p.t1["osc_mod"] = 2
-    p.fenv(r.uniform(0.04, 0.08), r.uniform(0.35, 0.5), 0.15, 0.2, amt=0.28).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.65, 0.9))
-    p.filt(r.uniform(600, 900), 0.35, kind=F_LP24)
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_O2PITCH, 0.3)
+    p.filt(r.uniform(1200, 1700), 0.35, kind=F_LP12, key=0.4)
+    _growl_lfo(p, r, ("1/8", "1/4", "1/12"), wave=r.choice([L_TRI, L_SAW]))
+    p.mod(3, S_LFO1, D_O2PITCH, r.uniform(0.8, 1.0)).mod(1, S_LFO1, D_CUT, r.uniform(0.3, 0.4))
+
+
+def growl_ring(p, o, r):
+    # ring mod against a square the LFO swings: grinding, metallic vowels
+    p.o1(W_SAW, octave=o, level=0.7).o2(W_SQR, octave=o + 1, level=0.6)
+    p.t1["osc_mod"] = 1
+    p.filt(r.uniform(900, 1300), 0.4, kind=F_LP24, key=0.4)
+    _growl_lfo(p, r, ("1/4", "1/8"))
+    p.mod(3, S_LFO1, D_O2PITCH, r.uniform(0.5, 0.65)).mod(1, S_LFO1, D_CUT, r.uniform(0.3, 0.4))
+
+
+def growl_vowel(p, o, r):
+    # pulse width and two band-pass formants moved together: "yoy - yoy"
+    p.o1(W_SQR, octave=o, shape=0.45, level=0.8).o2(W_SAW, octave=o, fine=6, level=0.45)
+    p.filt(r.uniform(450, 650), 0.55, kind=F_BP12, key=0.4)
+    _growl_lfo(p, r, ("1/4", "1/8", "1/2"))
+    p.mod(3, S_LFO1, D_O1SHAPE, 0.9).mod(1, S_LFO1, D_CUT, r.uniform(0.45, 0.55))
+    p.layer(0.5, filter_cutoff=cut(r.uniform(1300, 1700)), filter_reso=0.55, amp_pan=0.0)   # the second formant
+
+
+def growl_talk(p, o, r):
+    # two formants (about 450 and 1300 Hz) sliding together, with FM grit: talking bass
+    p.o1(W_SAW, octave=o, level=0.75).o2(W_SIN, octave=o + 1, level=0.0)
+    p.t1.update(osc2_level=1.0, fm_amt=r.uniform(0.3, 0.4))
+    p.filt(r.uniform(380, 480), 0.6, kind=F_BP12, key=0.3)
+    _growl_lfo(p, r, ("1/2", "1/4", "3/8"))
+    p.mod(1, S_LFO1, D_CUT, r.uniform(0.45, 0.55)).mod(3, S_LFO1, D_O2PITCH, 0.35)
+    p.layer(0.5, filter_cutoff=cut(r.uniform(1150, 1450)), filter_reso=0.6, amp_pan=0.0)
 
 
 def growl_morph(p, o, r):
-    # a pulse whose width ENV1 sweeps thin -> square, through a band-pass: "nyow"
-    # (on digital waves the shape control does nothing, so this is a pulse)
-    p.o1(W_SQR, octave=o, shape=0.05, level=0.8).o2(W_SAW, octave=o, fine=7, level=0.45)
-    p.fenv(r.uniform(0.06, 0.12), 0.45, 0.25, 0.2, amt=0.22).mod(2, S_ENV1, D_O1SHAPE, -0.9)
-    p.t1["osc1_shape"] = 0.9
-    p.filt(r.uniform(500, 800), 0.5, kind=F_BP12, key=0.4)
-    _grit(p, r)
-    p.mod(4, S_WHEEL, D_O1SHAPE, -0.4)
+    # a saw morphing toward its octave while resonance and FM move with it
+    p.o1(W_SAW, octave=o, level=0.8).o2(W_SIN, octave=o, level=0.0)
+    p.t1.update(osc2_level=1.0, fm_amt=r.uniform(0.35, 0.5))
+    p.filt(r.uniform(700, 1000), 0.55, kind=F_LP24, key=0.4)
+    _growl_lfo(p, r, ("1/8", "1/4", "3/16"))
+    p.mod(3, S_LFO1, D_O1SHAPE, 1.0).mod(1, S_LFO1, D_RESO, 0.45).mod(2, S_LFO1, D_O2PITCH, 0.5)
 
 
-def growl_talking(p, o, r):
-    # two band-passes (a low and a high formant) swept together by ENV1: speech-like
-    p.o1(W_SAW, octave=o, level=0.75).o2(W_SQR, octave=o, fine=5, shape=0.25, level=0.6)
-    p.filt(r.uniform(350, 450), 0.6, kind=F_BP12, key=0.3)
-    p.fenv(r.uniform(0.06, 0.12), 0.4, 0.2, 0.2, amt=r.uniform(0.22, 0.3))
-    p.layer(0.5, filter_cutoff=cut(r.uniform(1100, 1500)), filter_reso=0.6, amp_pan=0.0)
-    p.mod(4, S_WHEEL, D_CUT, 0.25)
+def growl_neuro(p, o, r):
+    # stepped random FM ratio and formant (a sequenced, tearing neuro growl)
+    p.o1(W_SAW, octave=o, level=0.75).o2(W_SIN, octave=o + 1, level=0.0).noise(r.uniform(0.04, 0.08))
+    p.t1.update(osc2_level=1.0, fm_amt=r.uniform(0.35, 0.45))
+    p.filt(r.uniform(700, 1000), 0.5, kind=F_BP12, key=0.4)
+    _growl_lfo(p, r, ("1/16", "1/8"), wave=L_RND)
+    p.mod(3, S_LFO1, D_O2PITCH, r.uniform(0.6, 0.8)).mod(1, S_LFO1, D_CUT, r.uniform(0.35, 0.45))
 
 
-def growl_snarl(p, o, r):
-    # noisy FM with a resonance sweep: a snarling, breathy growl
-    p.o1(W_SAW, octave=o, level=0.75).o2(W_SIN, octave=o, level=0.0).noise(r.uniform(0.08, 0.14))
-    p.t1["osc2_level"] = 1.0
-    p.t1["fm_amt"] = r.uniform(0.25, 0.35)
-    p.filt(r.uniform(500, 700), 0.55, kind=F_LP24).fenv(0.02, 0.3, 0.3, 0.2, amt=0.3)
-    p.mod(3, S_ENV1, D_RESO, 0.4)
-    _grit(p, r, (0.08, 0.12))
-    p.mod(4, S_WHEEL, D_CUT, 0.3)
+def growl_yoy(p, o, r):
+    # a screaming band-pass swung by the LFO, FM following: the classic "yoy"
+    p.o1(W_SAW, octave=o, fine=-6, level=0.75).o2(W_SIN, octave=o + 1, level=0.0)
+    p.t1.update(osc2_level=1.0, fm_amt=r.uniform(0.2, 0.3))
+    p.filt(r.uniform(350, 480), r.uniform(0.65, 0.75), kind=F_BP12, key=0.4)
+    _growl_lfo(p, r, ("1/4", "1/8", "1/2"), wave=L_SIN)
+    p.mod(1, S_LFO1, D_CUT, r.uniform(0.5, 0.6)).mod(3, S_LFO1, D_O2PITCH, r.uniform(0.35, 0.5))
 
 
 ARCHES = [
@@ -834,23 +844,24 @@ ARCHES = [
         "filter": [flt(None, F_LP24, 600, 0.0, key=0.0), flt("Soft", F_LP12, 350, 0.1, key=0.0), flt(None, F_LP24, 900, 0.05, key=0.0)],
         "fx": [fx_dry(), fx_tape(), fx_tube()],
     }),
-    Arch("Bass", "Reese", 14, ["Reese"], core_bass(glide=0.0), {
-        # always detuned saws: the stack decides how they beat against each other
-        "stack": [reese_stack(7, "Slow"), reese_stack(13, None), reese_stack(22, "Rough"),
-                  reese_stack(10, "Massive", uni=14), reese_stack(16, "Thick", uni=24), reese_stack(12, "Pulse", pulse=True)],
-        "filter": [flt(None, F_LP24, 900, 0.2, env=0.1, dec=0.5, sus=0.7), flt("Dark", F_LP24, 550, 0.25, env=0.08, dec=0.6, sus=0.7),
-                   flt("Open", F_LP12, 2200, 0.1), flt("Nasal", F_LP24, 1200, 0.45, env=0.1, dec=0.4, sus=0.6)],
+    Arch("Bass", "Reese", 14, ["Reese"], lambda p, r: (p.mono(glide=r.choice([0.0, 0.0, 0.05, 0.08]), legato=True),
+                                                       p.amp(0.002, 0.4, 1.0, 0.12, vel=0.15), reese_breath(p, r)), {
+        "stack": [reese_stack(54, None), reese_stack(40, "Slow"), reese_stack(62, "Wide"), reese_stack(48, "Massive", uni=18),
+                  reese_stack(36, "Thick", uni=28), reese_stack(50, "Pulse", wave1=W_SQR, pwm=True),
+                  reese_stack(46, "Square", wave1=W_SQR, wave2=W_SQR), reese_stack(56, "Hollow", wave2=W_SQR)],
+        "filter": [flt(None, F_LP24, 700, 0.2, env=0.12, dec=0.5, sus=0.7, key=0.7), flt("Dark", F_LP24, 450, 0.25, env=0.1, dec=0.6, sus=0.7, key=0.7),
+                   flt("Open", F_LP12, 1800, 0.12, key=0.7), flt("Nasal", F_LP24, 1000, 0.42, env=0.1, dec=0.4, sus=0.6, key=0.7)],
         "weight": [reese_sub(), reese_sub(), lay_none()],
-        "motion": [mv_still(), mv_still(), mv_drift((0.06, 0.12)), mv_wheel()],
+        "motion": [mv_still(), mv_still(), mv_drift((0.05, 0.1)), mv_wheel()],
         "fx": [fx_tape(), fx_drive(), fx_tube(), fx_phaser(), fx_flanger(), fx_phase_drive(), fx_chorus(), fx_dry()],
-    }, first={"stack": 1, "fx": 7, "motion": 0, "weight": 2}, words=["stack", "filter", "fx", "weight", "motion"]),
-    Arch("Bass", "Growl", 8, ["Growl", "Distorted"], core_bass(glide=0.05), {
-        # one hand-built growl per slot: the movement lives inside each note
-        "design": [Opt("Yoy", growl_yoy), Opt("Wow", growl_wow), Opt("FM", growl_fm), Opt("Ring", growl_ring),
-                   Opt("Sync", growl_sync), Opt("Morph", growl_morph), Opt("Talking", growl_talking), Opt("Snarl", growl_snarl)],
-        "grit": [Opt(None, lambda p, o, r: p.drive(r.uniform(0.5, 0.65), r.uniform(0.55, 0.7))),
-                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.45, 0.6), 0.6), p.sat(0.35, 0.5))),
-                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.55, 0.7), 0.65), p.chorus(0.25, 0.45, 0.12, kind=3)))],
+    }, first={"stack": 0, "fx": 7, "motion": 0, "weight": 2}, words=["stack", "filter", "fx", "weight", "motion"]),
+    Arch("Bass", "Growl", 8, ["Growl", "Distorted"], core_bass(glide=0.04), {
+        "design": [Opt("Yoy", growl_yoy), Opt("FM", growl_fm), Opt("Tearing", growl_sync), Opt("Grinding", growl_ring),
+                   Opt("Vowel", growl_vowel), Opt("Talking", growl_talk), Opt("Morphing", growl_morph), Opt("Neuro", growl_neuro)],
+        # growls live on heavy processing: drive into saturation, then flanger / phaser
+        "grit": [Opt(None, lambda p, o, r: (p.drive(r.uniform(0.55, 0.7), 0.7), p.sat(r.uniform(0.35, 0.5), 0.5))),
+                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.55, 0.7), 0.7), p.chorus(0.35, 0.55, 0.1, kind=2))),
+                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.6, 0.75), 0.7), p.chorus(0.35, 0.5, 0.12, kind=3), p.sat(0.3, 0.45)))],
         "weight": [reese_sub(), lay_none()],
     }, cycle="design", words=["design"]),
     Arch("Bass", "Wobble", 8, ["Wobble"], core_bass(glide=0.06), {

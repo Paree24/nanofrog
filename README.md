@@ -95,9 +95,13 @@ options ("Phased Metal Reese", "Sync Brass").
 
 Basses sound at the key's pitch (sub layers on the fundamental or an
 octave under). Reeses are always detuned saws (two, or a four-voice stack)
-with a clean sine sub; growls move inside each note (envelope-swept
-formants, FM ratio, ring, sync and pulse width), unlike wobbles, whose
-filter follows a tempo-synced LFO. `NANOFROG_RENDER_WAV=dir` (optionally
+(+-10 .. 30 cents) with a clean sine sub, and they breathe: a slow
+free-running LFO pushes the pair apart and together around the same centre
+pitch, so the beating speeds up and slows down. Growls use one per-note,
+tempo-synced LFO on the timbre (FM ratio, sync or ring pitch, pulse width /
+saw morph) and a band-pass formant together, through heavy drive; wobbles
+move only a low-pass cutoff. The in-key check allows a symmetric detuned
+pair up to 32 cents each side, since it is heard on its centre pitch. `NANOFROG_RENDER_WAV=dir` (optionally
 `NANOFROG_RENDER_MATCH=name`) makes the headless test render presets to WAV
 for auditioning.
 

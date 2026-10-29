@@ -182,7 +182,7 @@ static int firstWithTag (const juce::String& tag)
 
 // ---- WAV render (NANOFROG_RENDER_WAV=dir, NANOFROG_RENDER_MATCH=name part):
 // every matching factory preset plays one note (C2 for Bass, else C4) held
-// 1.5 s + 0.5 s release, written as <dir>/<index> <name>.wav (24-bit stereo).
+// 1.5 s (NANOFROG_RENDER_SECONDS) + 0.5 s release, written as <dir>/<index> <name>.wav (24-bit stereo).
 static int renderWavs (const char* dir, const char* match)
 {
     juce::File out (dir);
@@ -198,7 +198,8 @@ static int renderWavs (const char* dir, const char* match)
         px->prepareToPlay (44100.0, 512);
         px->loadFactoryPreset (idx);
         const int note = pr.tags.contains ("Bass") ? 36 : 60;
-        const int bs = 512, total = 44100 * 2, off = 44100 * 3 / 2;
+        const double hold = std::getenv ("NANOFROG_RENDER_SECONDS") != nullptr ? std::atof (std::getenv ("NANOFROG_RENDER_SECONDS")) : 1.5;
+        const int bs = 512, off = (int) (44100.0 * juce::jlimit (0.2, 30.0, hold)), total = off + 22050;
         juce::AudioBuffer<float> all (2, total), buf (2, bs);
         for (int pos = 0; pos < total; pos += bs)
         {
@@ -1114,7 +1115,8 @@ int main()
 
     // ---- in-key invariant: no factory oscillator more than 25 cents off the
     // played key (or its 4th/5th/octave). Covers every detune path: fine,
-    // Detune spread (+-15c*d), mono unison taps (+-25c*d), triangle Shape
+    // Detune spread (+-15c*d), mono unison taps (+-25c*d), symmetric detuned
+    // pairs (centre in key, each side up to 32c), triangle Shape
     // retune (+19 st, LFO1 via PWM), ring/FM off-octave ratios, vibrato. ----
     {
         auto idxOf = [] (const juce::String& id)
@@ -1135,6 +1137,13 @@ int main()
                 double det = g (pre + "voice_detune");
                 bool uni = (int) std::round (g (pre + "voice_poly")) == 1 && det > 0.01;
                 bool ringFm = ((int) g (pre + "osc_mod") % 2 == 1) || g (pre + "fm_amt") > 0.0f;
+                // a symmetric detuned pair (one up, one down by the same amount) is
+                // heard on its centre pitch: each may sit up to 32 cents out
+                const double s1 = g (pre + "osc1_fine") - 15.0 * det, s2 = g (pre + "osc2_fine") + 15.0 * det;
+                const bool both = g (pre + "osc1_level") * g (pre + "mix_o1") > 0.0f && g (pre + "osc2_level") * g (pre + "mix_o2") > 0.0f
+                                  && (int) std::round (g (pre + "osc1_pitch")) == 0 && (int) std::round (g (pre + "osc2_pitch")) == 0
+                                  && (int) std::round (g (pre + "osc1_octave")) == (int) std::round (g (pre + "osc2_octave"));
+                const bool symmetric = both && std::abs (s1 + s2) <= 6.0;
                 for (int o = 0; o < 2; ++o)
                 {
                     juce::String os = pre + (o == 0 ? "osc1" : "osc2");
@@ -1148,6 +1157,7 @@ int main()
                     if (o == 1 && ringFm && semis != 0) c += 100.0;
                     if ((int) g (os + "_wave") == 2
                         && (g (os + "_shape") > 0.0f || g (os + "_pwm") > 0.0f)) c += 100.0;
+                    if (symmetric) c *= 25.0 / 32.0;
                     worst = std::max (worst, c);
                 }
                 double vib = 0.02 * g (pre + "voice_vib") * g (pre + "lfo2_depth");
