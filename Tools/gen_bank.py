@@ -145,6 +145,12 @@ def cut(hz):
     return round(min(1.0, max(0.0, math.log(hz / 40.0) / math.log(450.0))), 4)
 
 
+def glide_knob(arrive):
+    """Portamento knob for a slide that arrives in ~`arrive` seconds (the
+    engine approaches the new pitch exponentially, tau = 2 * knob^2 s)."""
+    return round(math.sqrt(max(0.0, arrive) / 6.0), 4)
+
+
 def lrate(hz):
     return round(min(1.0, max(0.0, math.log(hz / 0.05) / math.log(600.0))), 4)
 
@@ -208,11 +214,11 @@ class Patch:
         self.sh.update(base_voice("t2_"))
 
     # --- voice
-    def mono(self, glide=0.0, legato=False, t2=True):
+    def mono(self, glide=0.0, legato=False, t2=True):   # glide: seconds to arrive
         for pre in ("", "t2_") if t2 else ("",):
             self.sh[pre + "voice_assign"] = 1
             self.sh[pre + "voice_poly"] = 1
-            self.sh[pre + "voice_portamento"] = glide
+            self.sh[pre + "voice_portamento"] = glide_knob(glide)
             self.sh[pre + "voice_trigger"] = 0 if legato else 1
         return self
 
@@ -381,7 +387,7 @@ def j(rng, x, amt):
 
 # ============================== BASS
 def b_808(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.0, 0.22, 0.3], v), legato=v % 4 >= 2)
+    p = Patch().mono(glide=pick([0.0, 0.0, 0.12, 0.18], v), legato=v % 4 >= 2)
     p.o1(W_SIN, octave=-1, level=0.95).filt(2400, key=0.0)
     p.amp(0.0, pick([0.8, 1.1, 0.6, 1.5, 0.9], v), 0.0, pick([0.15, 0.25, 0.12], v), vel=0.15)
     if v == 0:
@@ -396,7 +402,7 @@ def b_808(v, rng):
 
 
 def b_sub(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.12], v), legato=True)
+    p = Patch().mono(glide=pick([0.0, 0.08], v), legato=True)
     p.o1(pick([W_SIN, W_TRI, W_SIN, W_SQR], v), octave=-1, level=0.9)
     p.o2(W_SIN, octave=-1, level=0.0)
     if v % 4 == 3:
@@ -412,7 +418,7 @@ def b_sub(v, rng):
 
 def b_reese(v, rng):
     det = pick([12.0, 18.0, 9.0, 24.0, 15.0], v)
-    p = Patch().mono(glide=pick([0.0, 0.18], v), legato=True)
+    p = Patch().mono(glide=pick([0.0, 0.1], v), legato=True)
     p.o1(W_SAW, octave=-1, fine=-det, level=0.75).o2(W_SAW, octave=-1, fine=det, level=0.75)
     p.filt(pick([700, 900, 550, 1200, 800], v), pick([0.12, 0.2, 0.08], v))
     p.fenv(0.0, 0.4, 0.6, 0.2, amt=0.12).amp(0.003, 0.3, 1.0, 0.15, vel=0.1)
@@ -427,7 +433,7 @@ def b_reese(v, rng):
 
 def b_growl(v, rng):
     div = pick(["1/8", "1/16", "1/8", "1/4", "1/12"], v)
-    p = Patch().mono(glide=0.08, legato=True)
+    p = Patch().mono(glide=0.05, legato=True)
     if v % 2 == 0:
         p.o1(W_SAW, octave=-1, level=0.7).o2(W_SQR, octave=-1, fine=7, level=0.6, shape=0.3)
         p.t1["fm_amt"] = pick([0.25, 0.35, 0.2], v)
@@ -444,7 +450,7 @@ def b_growl(v, rng):
 
 def b_wobble(v, rng):
     div = pick(["1/4", "1/8", "1/8", "1/6", "3/8", "1/16"], v)
-    p = Patch().mono(glide=0.1, legato=True)
+    p = Patch().mono(glide=0.06, legato=True)
     p.o1(W_SAW, octave=-1, level=0.7).o2(pick([W_SQR, W_SAW], v), octave=-1, fine=pick([5, -8], v), level=0.6)
     p.filt(pick([180, 220, 150], v), pick([0.35, 0.45, 0.4], v), key=0.3)
     p.lfo1(pick([L_SIN, L_TRI, L_SIN, L_SQR], v), sync=div, depth=1.0, key=1)
@@ -481,7 +487,7 @@ def b_house(v, rng):
 
 
 def b_analog(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.2, 0.0, 0.3], v), legato=v % 2 == 1)
+    p = Patch().mono(glide=pick([0.0, 0.1, 0.0, 0.15], v), legato=v % 2 == 1)
     p.o1(W_SAW, octave=-1, level=0.8).o2(pick([W_SQR, W_SAW, W_SQR], v), octave=pick([-1, -2], v),
                                          fine=pick([6, -4, 8], v), level=0.6, shape=pick([0.0, 0.25], v))
     p.filt(pick([320, 450, 260, 600], v), pick([0.25, 0.15, 0.35], v))
@@ -494,7 +500,7 @@ def b_analog(v, rng):
 
 
 def b_acid(v, rng):
-    p = Patch().mono(glide=pick([0.14, 0.18], v), legato=True)
+    p = Patch().mono(glide=pick([0.08, 0.1], v), legato=True)
     p.o1(pick([W_SAW, W_SQR, W_SAW], v), octave=-1, level=0.85).o2(W_SAW, level=0.0)
     p.filt(pick([260, 320, 220], v), pick([0.72, 0.65, 0.78], v), kind=F_LP24, key=0.35)
     p.fenv(0.0, pick([0.18, 0.25, 0.14], v), 0.0, 0.1, amt=pick([0.5, 0.42, 0.58], v))
@@ -518,17 +524,16 @@ def b_fm(v, rng):
 
 # ============================== LEAD
 def l_supersaw(v, rng):
-    p = Patch().unison(pick([24.0, 30.0, 20.0, 35.0, 27.0], v))
+    p = Patch().unison(pick([16.0, 20.0, 14.0, 22.0, 18.0], v))
     p.o1(W_SAW, level=0.7).o2(W_SAW, octave=pick([0, 1, 0, -1], v), fine=pick([7, 5, 10], v), level=0.55)
     p.filt(pick([5200, 7000, 4200, 8800], v), 0.1).fenv(0.0, 0.5, 0.6, 0.3, amt=0.12)
     p.amp(0.004, 0.4, 1.0, pick([0.35, 0.5, 0.25], v), vel=0.2)
     p.chorus(0.22, 0.3, 0.3).delay(pick(["3/16", "1/8", "1/4"], v), 0.32, 0.18).verb(0.2, 0.6)
-    p.sh["voice_portamento"] = p.sh["t2_voice_portamento"] = pick([0.0, 0.12], v)
     return p, ["Supersaw"]
 
 
 def l_square(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.1, 0.16], v), legato=v % 3 > 0)
+    p = Patch().mono(legato=v % 3 > 0)
     p.o1(W_SQR, shape=pick([0.0, 0.35, 0.6], v), level=0.75).o2(W_SQR, octave=pick([0, 1], v), fine=4, level=0.3)
     p.filt(pick([3800, 5000, 2600], v), 0.1).amp(0.003, 0.3, 1.0, 0.2, vel=0.2)
     p.lfo2(L_TRI, 5.5).sh["voice_vib"] = 0.5
@@ -538,7 +543,7 @@ def l_square(v, rng):
 
 
 def l_sync(v, rng):
-    p = Patch().mono(glide=pick([0.0, 0.12], v), legato=True)
+    p = Patch().mono(legato=True)
     p.o1(W_SAW, level=0.0).o2(W_SAW, pitch=pick([7, 12, 5, 0], v), level=0.85)
     p.t1["osc_mod"] = 2
     p.fenv(0.0, pick([0.35, 0.6, 0.25], v), pick([0.15, 0.3], v), 0.3)
@@ -551,7 +556,7 @@ def l_sync(v, rng):
 
 
 def l_glide(v, rng):
-    p = Patch().mono(glide=pick([0.28, 0.36, 0.22, 0.42], v), legato=True)
+    p = Patch().mono(glide=pick([0.18, 0.25, 0.15, 0.3], v), legato=True)
     p.o1(pick([W_SAW, W_SAW, W_SQR], v), level=0.75).o2(W_SAW, fine=pick([-7, 9, -5], v), level=0.6)
     p.filt(pick([2800, 3600, 2200, 4400], v), pick([0.25, 0.18, 0.32], v))
     p.fenv(0.0, 0.5, 0.45, 0.3, amt=0.2).amp(0.004, 0.3, 1.0, 0.3, vel=0.15)
@@ -563,7 +568,7 @@ def l_glide(v, rng):
 
 
 def l_soft(v, rng):
-    p = Patch().mono(glide=pick([0.1, 0.0], v), legato=True)
+    p = Patch().mono(legato=True)
     p.o1(pick([W_SIN, W_TRI, W_TRI], v), level=0.85)
     p.o2(W_SIN, octave=1, level=pick([0.15, 0.0, 0.25], v)).noise(pick([0.04, 0.08, 0.0], v))
     p.filt(pick([3000, 2400, 4200], v), 0.0).amp(pick([0.04, 0.07, 0.02], v), 0.3, 1.0, 0.35, vel=0.3)
@@ -575,7 +580,7 @@ def l_soft(v, rng):
 
 def l_digital(v, rng):
     fam = pick(["vocal", "bright", "reed", "vocal", "analog", "metal", "bright"], v)
-    p = Patch().mono(glide=pick([0.0, 0.14], v), legato=True)
+    p = Patch().mono(legato=True)
     p.o1(W_DIG, digital=dig(fam, v, v % 2), level=0.8).o2(W_SAW, fine=6, level=pick([0.25, 0.0, 0.35], v))
     p.filt(pick([4200, 3000, 6000], v), 0.12).amp(0.005, 0.3, 1.0, 0.25, vel=0.2)
     p.lfo1(L_TRI, hz=pick([0.6, 1.2, 0.3], v), depth=0.6).mod(1, S_LFO1, D_CUT, 0.08)
@@ -586,14 +591,43 @@ def l_digital(v, rng):
 
 
 def l_rave(v, rng):
-    p = Patch().unison(pick([35.0, 45.0, 28.0], v))
-    p.sh["voice_portamento"] = p.sh["t2_voice_portamento"] = 0.12
-    p.o1(W_SQR, shape=0.25, pwm=0.4, level=0.7).o2(W_SAW, octave=-1, fine=-8, level=0.5)
-    p.lfo1(L_TRI, hz=pick([3.5, 5.0, 2.5], v), depth=0.8, key=0)
-    p.fenv(0.0, 0.25, 0.0, 0.2).mod(2, S_ENV1, D_PITCH, -pick([0.08, 0.12, 0.05], v))
-    p.filt(pick([3200, 4500, 2500], v), 0.15).amp(0.003, 0.3, 1.0, 0.2, vel=0.15)
-    p.chorus(0.3, 0.45, 0.35).drive(0.3, 0.35).verb(0.15, 0.55)
-    return p, ["Rave"]
+    """Six different rave leads; returns its own name noun per design."""
+    p = Patch()
+    kind = v % 6
+    if kind == 0:      # classic: pulse + saw an octave down, 4-voice stack, a short dive into the note
+        p.unison(18.0).o1(W_SQR, shape=0.3, pwm=0.5, level=0.7).o2(W_SAW, octave=-1, level=0.55)
+        p.lfo1(L_TRI, hz=4.5, depth=0.7, key=0)                       # pulse-width movement
+        p.fenv(0.0, 0.08, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, 0.06)     # starts ~0.7 st sharp, drops in
+        p.filt(3800, 0.1).amp(0.002, 0.3, 1.0, 0.25, vel=0.15)
+        p.chorus(0.4, 0.55, 0.3).verb(0.15, 0.55)
+        return p, ["Rave", "Unison"], "Rave Lead"
+    if kind == 1:      # siren: a synced LFO swings the pitch
+        p.mono(legato=True).o1(W_SQR, shape=0.15, level=0.75).o2(W_SAW, fine=6, level=0.45)
+        p.lfo1(L_TRI, sync="1/8", depth=1.0, key=2).mod(1, S_LFO1, D_PITCH, 0.12)   # +-1.4 st
+        p.filt(4200, 0.15).amp(0.004, 0.3, 1.0, 0.3, vel=0.1).delay("3/16", 0.3, 0.16).verb(0.2, 0.6)
+        return p, ["Rave", "Siren"], "Siren"
+    if kind == 2:      # dark: low and thick, timbre 2 an octave down through a resonant filter
+        p.unison(14.0).o1(W_SAW, level=0.7).o2(W_SQR, octave=-1, shape=0.2, level=0.6)
+        p.filt(1100, 0.35).fenv(0.0, 0.4, 0.4, 0.2, amt=0.25).amp(0.002, 0.3, 1.0, 0.2, vel=0.1)
+        p.layer(0.45, osc1_octave=-1, osc2_octave=-2, filter_cutoff=cut(700), amp_pan=0.0)
+        p.drive(0.4, 0.45).chorus(0.3, 0.4, 0.25, kind=3)
+        return p, ["Rave", "Dark"], "Dark Rave Lead"
+    if kind == 3:      # sync: a hard-synced saw with an envelope sweep, stacked
+        p.unison(16.0).o1(W_SAW, level=0.0).o2(W_SAW, pitch=7, level=0.8)
+        p.t1["osc_mod"] = 2
+        p.fenv(0.0, 0.5, 0.25, 0.3).mod(2, S_ENV1, D_O2PITCH, 0.55).mod(4, S_WHEEL, D_O2PITCH, 0.3)
+        p.filt(5000, 0.1).amp(0.002, 0.3, 1.0, 0.25, vel=0.15).chorus(0.3, 0.45, 0.3).verb(0.15, 0.55)
+        return p, ["Rave", "Sync"], "Sync Rave Lead"
+    if kind == 4:      # fifth: every key plays a root + fifth chord (stab-like lead)
+        p.mono(legato=True).o1(W_SAW, level=0.65).o2(W_SAW, pitch=7, fine=4, level=0.55)
+        p.filt(2600, 0.2).fenv(0.0, 0.3, 0.3, 0.2, amt=0.3).amp(0.002, 0.4, 0.8, 0.25, vel=0.2)
+        p.wide(6.0, 0.35).chorus(0.3, 0.4, 0.25).delay("1/8", 0.3, 0.15).verb(0.15, 0.55)
+        return p, ["Rave", "Fifth"], "Fifth Lead"
+    # rise: each note climbs into pitch from below while the filter opens
+    p.unison(20.0).o1(W_SQR, shape=0.35, level=0.7).o2(W_SAW, octave=-1, level=0.5)
+    p.fenv(0.0, 0.3, 0.0, 0.2, amt=0.3).mod(2, S_ENV1, D_PITCH, -0.1)     # starts ~1.2 st low
+    p.filt(1600, 0.25).amp(0.01, 0.3, 1.0, 0.3, vel=0.1).chorus(0.35, 0.5, 0.3).drive(0.25, 0.35).verb(0.2, 0.6)
+    return p, ["Rave", "Rise"], "Rising Lead"
 
 
 def l_pluck(v, rng):
@@ -1014,12 +1048,14 @@ def build():
     for cat, fn, count, nouns in PLAN:
         for v in range(count):
             rng = random.Random(f"nanofrog-2026-10-29-{fn.__name__}-{v}")
-            p, tags = fn(v, rng)
+            out = fn(v, rng)
+            p, tags = out[0], out[1]
+            own = out[2] if len(out) > 2 else None   # a recipe with distinct designs names them
             # name: an adjective from the category list + one of the recipe's nouns
             for _ in range(400):
                 adj = ADJ[cat][adj_pos[cat] % len(ADJ[cat])]
                 adj_pos[cat] += 1
-                noun = nouns[(v + adj_pos[cat] // len(ADJ[cat])) % len(nouns)]
+                noun = own or nouns[(v + adj_pos[cat] // len(ADJ[cat])) % len(nouns)]
                 name = f"{adj} {noun}"
                 if name not in used:
                     break
