@@ -984,10 +984,10 @@ void NanoFrogProcessor::mutateCurrentPatch()
     }
     juce::String cat = tags.isEmpty() ? juce::String() : tags[0];
     if (cat == "User" && tags.size() > 1) cat = tags[1]; // user files tag [User, category]
-    // Bass/keys/leads/percussive (Hit = stabs, Bell = bells/plucks) voices
+    // Bass/keys/leads/percussive (Hit = stabs, Bell, Pluck) voices
     // keep their envelopes: transients carry these sounds.
     bool freezeAdsr = (cat == "Bass" || cat == "Lead" || cat == "Keys"
-                       || cat == "Hit" || cat == "Bell");
+                       || cat == "Hit" || cat == "Bell" || cat == "Pluck");
 
     auto rawOf = [&] (const juce::String& pid) -> float
     {

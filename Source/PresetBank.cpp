@@ -339,7 +339,7 @@ int findByName (const juce::String& name)
 
 juce::StringArray categoryList()
 {
-    return { "Bass", "Lead", "Pad", "Arp", "Keys", "Bell",
+    return { "Bass", "Lead", "Pad", "Pluck", "Arp", "Keys", "Bell",
              "Brass", "Choir", "Hit", "SFX", "Sequence" };
 }
 

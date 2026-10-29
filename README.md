@@ -25,8 +25,10 @@ mipmapped, TRIANGLE Control 1 folds the wave and SINE Control 1 sets the
 cross-mod depth from OSC2. Pitch-bend range is adjustable. A single header
 knob crossfades Timbre 1 ↔ Timbre 2.
 
-It ships 401 original factory presets as editable JSON data (never compiled
-in) with category/character tags, a preset browser with search + tag
+It ships Init plus 400 original factory presets of modern sounds (808s,
+reese, growl and wobble basses, supersaw leads and pads, future-bass and
+house plucks, keys, bells, arps and sequences, brass, choirs, stabs and
+risers) as editable JSON data (never compiled in) with category/character tags, a preset browser with search + tag
 filters, user preset save/overwrite/delete, undo / redo (Ctrl+Z), plus a header
 MUTATE button (with section LOCKS) that slightly re-rolls the current sound (oscillators included but never pitch; envelopes
 frozen for bass/keys/leads/percussive voices; bypassed modules never wake up).
@@ -79,21 +81,19 @@ shipped bank is never modified, the row shows `*`); DEL on that row restores
 the original.
 
 The factory bank is data, not code: edit `FactoryBank/NanoFrogFactory.json`
-by hand, or regenerate it with `python3 Tools/gen_bank.py` (deterministic:
-per-slot seeds plus `Tools/bank_salts.json`). Every preset is built from its
-recipe plus category-aware variation and must differ from all earlier ones.
-`python3 Tools/audio_diversity.py` (needs the built headless test) renders
-the bank, re-rolls presets that *sound* like an earlier one, and updates the
-salts — the shipped bank is under the 8% clone target (7.2% after the voice /
-modulation changes; was ~70% before the loop existed).
+by hand, or regenerate it with `python3 Tools/gen_bank.py` (deterministic).
+Presets are designed, not rolled: each archetype (808, reese, supersaw,
+future pluck, ...) is a recipe in real units (seconds, Hz, cents) and its
+variants pick from lists of settings that suit the sound.
 
 Every factory preset is guaranteed in key: no oscillator sits more than 25
 cents from the played note (or its fourth/fifth/octave), counting fine tune,
 Detune spread, unison, ring/FM ratios and vibrato
-(`pitch_safe` in the generator; checked by the headless test).
-`python3 Tools/level_bank.py` measures every preset and writes
-`Tools/bank_levels.json` (output-level trims: even levels, ~2.5 dB under the
-untrimmed bank, loud outliers pulled in hardest).
+(`keep_in_tune` in the generator; checked by the headless test).
+`python3 Tools/level_bank.py` renders every preset and writes
+`Tools/bank_levels.json`: output-level trims from each preset's loudest
+0.1 s, so plucks and pads sit at the same perceived level (90% of the bank
+within ~6 dB).
 
 ### OS-specific notes
 
@@ -164,14 +164,11 @@ untrimmed bank, loud outliers pulled in hardest).
 - `Source/` — plugin DSP, UI, preset backend
   (`DSP/` voices/filters/FX, `PluginProcessor.*`, `PluginEditor.*`,
   `PresetBank.*`, `PresetBrowser.*`, `NanoLook.h`)
-- `FactoryBank/NanoFrogFactory.json` — the 401 factory presets (data:
+- `FactoryBank/NanoFrogFactory.json` — Init + 400 factory presets (data:
   names, tags, raw parameter values; regenerate with `Tools/gen_bank.py`)
 - `Assets/` — embedded Lato fonts + OFL notice
 - `Tools/gen_bank.py` — deterministic factory-bank generator (reads the
   live parameter order from the sources, so the table can't drift)
-- `Tools/audio_diversity.py` + `Tools/bank_salts.json` — audio-verified
-  de-cloning loop for the factory bank (renders via the headless test's
-  `NANOFROG_DUMP_FEATURES` mode)
 - `Tools/level_bank.py` + `Tools/bank_levels.json` — measured loudness trims
   (renders via the headless test's `NANOFROG_DUMP_PITCH` mode)
 - `HeadlessTest.cpp` — headless regression suite: layout geometry,

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""NanoFrog factory bank generator — 401 original presets, deterministic.
+"""NanoFrog factory bank generator: Init + 400 presets, deterministic.
 
 Reads the live parameter order (kParamIds in Source/PresetBank.cpp) and the
 ranges from Source/PluginProcessor.cpp, so the table can never drift from the
-plugin. Writes FactoryBank/NanoFrogFactory.json (applying the loudness trims
-in Tools/bank_levels.json and the re-roll salts in Tools/bank_salts.json).
+plugin. Writes FactoryBank/NanoFrogFactory.json, applying the loudness trims
+in Tools/bank_levels.json (made by Tools/level_bank.py).
 
-All names, recipes, and DSP are original work. Names are evocative of genre
-archetypes (trance, house, dubstep, DnB, ...) without copying any hardware,
-software, artist, or label names.
+Presets are designed, not rolled: each archetype (808, reese, supersaw lead,
+future pluck, ...) is a recipe in real units (seconds, Hz, cents) and its
+variants pick from lists of musically sensible settings. All names and
+recipes are original; no hardware, software, artist or label names.
 
 Usage: python3 Tools/gen_bank.py   (run from NanoBerg/)
 """
@@ -101,1667 +102,956 @@ for k in KIDS:
     assert k in RANGE or k in NCHOICE, f"no range for {k}"
 print("ranges ok", file=sys.stderr)
 
-# ------------------------------------------------------------------- helpers
-W_SAW, W_SQR, W_TRI, W_SIN, W_DIG, W_NOI, W_USR = range(7)
+# ------------------------------------------------------------------- units
+# Knob curves (Source/PluginProcessor.cpp, Source/DSP/Voice.h):
+#   attack  = 0.002 + v^2 * 4 s      decay / release = 0.002 + v^2 * 8 s (to ~-60 dB)
+#   cutoff  = 40 * 450^v Hz          LFO rate = 0.05 * 600^v Hz
+#   mod amount 1.0 = +-12 semitones on pitch, +-0.5 of the cutoff knob
+import math
+
+W_SAW, W_SQR, W_TRI, W_SIN, W_DIG, W_NOI = range(6)
 F_LP24, F_LP12, F_BP12, F_HP12 = range(4)
 L_SIN, L_TRI, L_SQR, L_SAW, L_RND = range(5)
-SYNC_DIV = {"1/2": 4, "1/4": 7, "1/8": 10, "1/16": 13}
-ARP_RATE = {"1/4": 0, "1/8": 1, "1/16": 2, "1/8T": 3, "1/16T": 4, "1/32": 5}
-# digital families: index%8 -> 0 analog 1 reed 2 bell 3 metal 4 vocal 5 bright 6 wood 7 detune
-DIG = {fam: [fam + 8 * v + 64 * b for b in (0, 1) for v in range(8)]
-       for fam in range(8)}
+S_ENV1, S_ENV2, S_LFO1, S_LFO2, S_VEL, S_KEY, S_BEND, S_WHEEL, S_RAND = range(9)
+D_PITCH, D_O2PITCH, D_O1SHAPE, D_NOISE, D_CUT, D_RESO, D_AMP, D_PAN, D_L1RATE, D_L2RATE = range(10)
+# tempo divisions shared by the LFO and delay sync menus (0 = free)
+DIV = {"1/1": 1, "3/4": 2, "1/2": 4, "3/8": 5, "1/4": 7, "3/16": 8, "1/6": 9,
+       "1/8": 10, "3/32": 11, "1/12": 12, "1/16": 13, "1/32": 15}
+ARP = {"1/4": 0, "1/8": 1, "1/16": 2, "1/8T": 3, "1/16T": 4, "1/32": 5, "1/6": 6}
+ARP_UP, ARP_DOWN, ARP_ALT1, ARP_ALT2, ARP_RND, ARP_TRIG = range(6)
+# digital waves: index % 8 = family, + 8 * variant (0..7), + 64 for the second set
+FAM = {"analog": 0, "reed": 1, "bell": 2, "metal": 3, "vocal": 4, "bright": 5, "wood": 6, "detune": 7}
 
 
-def base_shared(rng):
-    return {
-        "modfx_type": 0, "modfx_rate": 0.25, "modfx_depth": 0.25, "modfx_mix": 0.0,
-        "delay_type": 0, "delay_time": 0.35, "delay_feedback": 0.25, "delay_mix": 0.0,
-        "eq_low": 0.0, "eq_high": 0.0,
-        "arp_on": 0, "arp_mode": 0, "arp_rate": 2, "arp_gate": 0.8,
-        "arp_octaves": 1, "arp_swing": 0.0, "arp_latch": 0,
-        "voice_poly": 1, "voice_detune": 0.0, "voice_portamento": 0.0, "voice_vib": 0.0,
-        "t2_voice_poly": 1, "t2_voice_detune": 0.0,
-        "t2_voice_portamento": 0.0, "t2_voice_vib": 0.0,
-        "output_level": 1.0, "master_tune": 0.0, "song_tempo": 120.0, "tmix": 0.0,
-        "limiter": 1,
-        "arp_last_step": 8, **{f"arp_step{k}": 1 for k in range(1, 9)},
-        "bend_range": 2.0, "delay_sync": 0,
-        "voice_trigger": 0, "voice_priority": 0, "voice_unidet": 15.0,
-        "t2_voice_trigger": 0, "t2_voice_priority": 0, "t2_voice_unidet": 15.0,
-    }
+def dig(fam, var=0, alt=0):
+    return FAM[fam] + 8 * (var % 8) + 64 * alt
+
+
+def atk(sec):
+    return round(math.sqrt(max(0.0, sec - 0.002) / 4.0), 4)
+
+
+def tm(sec):
+    return round(math.sqrt(max(0.0, min(8.0, sec) - 0.002) / 8.0), 4)
+
+
+def fall(sec):
+    """Decay / release knob for a sound that falls ~20 dB in `sec`: the
+    knob's time is the fall to ~-60 dB (exponential), three times longer."""
+    return tm(3.0 * sec)
+
+
+def cut(hz):
+    return round(min(1.0, max(0.0, math.log(hz / 40.0) / math.log(450.0))), 4)
+
+
+def lrate(hz):
+    return round(min(1.0, max(0.0, math.log(hz / 0.05) / math.log(600.0))), 4)
 
 
 def base_timbre():
     return {
-        "lfo1_keysync": 2, "lfo2_keysync": 2,  # Voice: per-note restart (as before)
         "osc1_wave": W_SAW, "osc1_digital": 0, "osc1_octave": 0, "osc1_pitch": 0,
-        "osc1_fine": 0.0, "osc1_level": 1.0, "osc1_shape": 0.0, "osc1_pwm": 0.5,
+        "osc1_fine": 0.0, "osc1_level": 1.0, "osc1_shape": 0.0, "osc1_pwm": 0.0,
         "osc1_xmod": 0.0, "osc_mod": 0,
         "osc2_wave": W_SAW, "osc2_octave": 0, "osc2_pitch": 0, "osc2_fine": 0.0,
-        "osc2_level": 0.0, "osc2_shape": 0.0, "osc2_pwm": 0.5, "osc2_digital": 0,
+        "osc2_level": 0.0, "osc2_shape": 0.0, "osc2_pwm": 0.0, "osc2_digital": 0,
         "osc2_xmod": 0.0,
-        "mix_o1": 1.0, "mix_o2": 0.0, "mix_noise": 0.0, "fm_amt": 0.0,
+        "mix_o1": 0.8, "mix_o2": 0.0, "mix_noise": 0.0, "fm_amt": 0.0,
         "filter_type": F_LP24, "filter_cutoff": 1.0, "filter_reso": 0.0,
-        "filter_keytrack": 0.0, "filter_envamt": 0.0,
-        "amp_level": 1.0, "amp_pan": 0.0, "amp_velocity": 0.0,
+        "filter_keytrack": 0.5, "filter_envamt": 0.0,
+        "amp_level": 1.0, "amp_pan": 0.0, "amp_velocity": 0.25,
         "amp_dist": 0, "amp_drive": 0.0,
-        "env1_a": 0.0, "env1_d": 0.0, "env1_s": 1.0, "env1_r": 0.1,
-        "env2_a": 0.0, "env2_d": 0.0, "env2_s": 1.0, "env2_r": 0.1,
-        "lfo1_wave": L_SIN, "lfo1_rate": 0.5, "lfo1_depth": 0.0,
-        "lfo2_wave": L_SIN, "lfo2_rate": 0.5, "lfo2_depth": 0.0,
-        "lfo1_sync": 0, "lfo2_sync": 0,
-        "mod1_src": 2, "mod1_dst": 4, "mod1_amt": 0.0,
-        "mod2_src": 0, "mod2_dst": 0, "mod2_amt": 0.0,
-        "mod3_src": 3, "mod3_dst": 1, "mod3_amt": 0.0,
-        "mod4_src": 4, "mod4_dst": 6, "mod4_amt": 0.0,
+        "env1_a": 0.0, "env1_d": tm(0.3), "env1_s": 0.0, "env1_r": tm(0.3),
+        "env2_a": 0.0, "env2_d": tm(0.3), "env2_s": 1.0, "env2_r": tm(0.3),
+        "lfo1_wave": L_SIN, "lfo1_rate": lrate(1.0), "lfo1_depth": 0.0,
+        "lfo2_wave": L_SIN, "lfo2_rate": lrate(5.0), "lfo2_depth": 0.0,
+        "lfo1_sync": 0, "lfo2_sync": 0, "lfo1_keysync": 2, "lfo2_keysync": 0,
+        "mod1_src": S_LFO1, "mod1_dst": D_CUT, "mod1_amt": 0.0,
+        "mod2_src": S_ENV1, "mod2_dst": D_PITCH, "mod2_amt": 0.0,
+        "mod3_src": S_LFO2, "mod3_dst": D_O2PITCH, "mod3_amt": 0.0,
+        "mod4_src": S_VEL, "mod4_dst": D_CUT, "mod4_amt": 0.0,
     }
 
 
-def apply(prefix, dst, d):
-    for k, v in d.items():
-        dst[prefix + k] = v
-
-
-def derive_t2(t1, rng, style):
-    """Timbre 2 starts as a copy of timbre 1, then diverges per style."""
-    t2 = dict(t1)
-    if style == "copy":
-        t2["voice_detune"] = min(1.0, t1.get("voice_detune", 0.0) + rng.uniform(0.05, 0.15))
-        t2["amp_pan"] = -t1.get("amp_pan", 0.0)
-    elif style == "octave_up":
-        t2["osc1_octave"] = min(2, t1.get("osc1_octave", 0) + 1)
-        t2["osc2_octave"] = min(2, t1.get("osc2_octave", 0) + 1)
-        t2["filter_cutoff"] = min(1.0, t1.get("filter_cutoff", 1.0) + 0.1)
-        t2["amp_pan"] = 0.3
-    elif style == "octave_down":
-        t2["osc1_octave"] = max(-2, t1.get("osc1_octave", 0) - 1)
-        t2["osc2_octave"] = max(-2, t1.get("osc2_octave", 0) - 1)
-        t2["amp_pan"] = -0.3
-    elif style == "wide":
-        t2["voice_detune"] = min(1.0, t1.get("voice_detune", 0.0) + rng.uniform(0.2, 0.4))
-        t2["osc1_fine"] = -t1.get("osc1_fine", 0.0) + rng.uniform(-8, 8)
-        t2["amp_pan"] = 0.4 if t1.get("amp_pan", 0.0) <= 0 else -0.4
-    elif style == "dark":
-        t2["filter_cutoff"] = max(0.0, t1.get("filter_cutoff", 1.0) - rng.uniform(0.15, 0.3))
-        t2["filter_reso"] = min(1.0, t1.get("filter_reso", 0.0) + 0.1)
-    # keep voice counts matched
-    t2["voice_poly"] = t1.get("voice_poly", 1)
-    return t2
-
-
-def arp_on(shared, rng, tempo, rate="1/16", mode=None, gate=None, octs=1):
-    shared["arp_on"] = 1
-    shared["song_tempo"] = float(tempo)
-    shared["arp_rate"] = ARP_RATE[rate]
-    shared["arp_mode"] = rng.randint(0, 5) if mode is None else mode
-    shared["arp_gate"] = rng.uniform(0.5, 0.85) if gate is None else gate
-    shared["arp_octaves"] = octs
-
-
-def space(shared, rng, chorus=None, delay=None, verb_eq=None):
-    if chorus is None:
-        chorus = rng.random() < 0.5
-    if chorus:
-        shared["modfx_type"] = rng.randint(1, 3)
-        shared["modfx_rate"] = rng.uniform(0.15, 0.4)
-        shared["modfx_depth"] = rng.uniform(0.2, 0.5)
-        shared["modfx_mix"] = rng.uniform(0.15, 0.35)
-    if delay is None:
-        delay = rng.random() < 0.5
-    if delay:
-        shared["delay_type"] = rng.randint(0, 2)
-        shared["delay_time"] = rng.uniform(0.25, 0.5)
-        shared["delay_feedback"] = rng.uniform(0.2, 0.4)
-        shared["delay_mix"] = rng.uniform(0.1, 0.3)
-
-
-# ------------------------------------------------------------------- recipes
-def r_init(rng, v):
-    # Vanilla but complete: single saw + a whisper of detuned osc2.
-    t1 = base_timbre()
-    t1.update(osc2_wave=W_SAW, osc2_level=0.5, osc2_fine=4.0, mix_o2=0.5)
-    return t1, {}, {"tmix": 0.0}
-
-
-def r_init_lead(rng, v):
-    # Fat-but-neutral lead starter: two detuned saws, open filter, mono.
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_level=0.8, osc2_fine=8.0,
-              mix_o2=0.8, filter_cutoff=0.8, filter_reso=0.1,
-              filter_envamt=0.25, filter_keytrack=0.5,
-              env1_a=0.0, env1_d=0.2, env1_s=0.8, env1_r=0.15)
-    return t1, {}, {"voice_poly": 1, "voice_detune": 0.12,
-                    "voice_portamento": 0.0, "song_tempo": 120.0}
-
-
-def _bass_common(t1, rng, cutoff, reso, octv=-1, wave=W_SAW):
-    t1.update(osc1_wave=wave, osc1_octave=octv, filter_cutoff=cutoff,
-              filter_reso=reso, env1_a=0.0, env1_d=rng.uniform(0.1, 0.25),
-              env1_s=rng.uniform(0.3, 0.7), env1_r=0.1,
-              env2_a=0.0, env2_d=0.05, env2_s=1.0, env2_r=0.08,
-              filter_envamt=rng.uniform(0.3, 0.6),
-              # weight: detuned second osc under everything + gentle saturation
-              osc2_wave=rng.choice([W_SAW, W_SAW, W_SQR, W_TRI]),
-              osc2_level=0.55, osc2_fine=rng.uniform(-7, 7),
-              mix_o2=0.55, amp_drive=0.18, amp_dist=1)
-
-
-def r_sub(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.2, 0.35), rng.uniform(0.0, 0.15),
-                 octv=-2 if v % 2 == 0 else -1,
-                 wave=W_SIN if v % 3 else W_TRI)
-    t1["filter_keytrack"] = 0.5
-    # subs stay clean but warm
-    t1.update(amp_drive=0.12, amp_dist=0)
-    return t1, {}, {}
-
-
-def r_acid(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.3, 0.5), rng.uniform(0.55, 0.8),
-                 wave=W_SAW if v % 2 == 0 else W_SQR)
-    t1.update(osc1_pwm=rng.uniform(0.2, 0.4) if t1["osc1_wave"] == W_SQR else 0.5,
-              filter_envamt=rng.uniform(0.5, 0.85),
-              env1_d=rng.uniform(0.15, 0.3), env1_s=0.2,
-              amp_drive=rng.uniform(0.2, 0.4), amp_dist=1)
-    sh = {"song_tempo": float(rng.choice([124, 128, 130, 135]))}
-    if v % 4 == 3:
-        arp_on(sh, rng, sh["song_tempo"], rate="1/16", mode=0, gate=0.6)
-    return t1, {}, sh
-
-
-def r_reese(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.4, 0.6), rng.uniform(0.2, 0.45), octv=-1)
-    t1.update(osc2_wave=W_SAW, osc2_level=0.9,
-              osc2_fine=rng.uniform(14, 26) * rng.choice([-1.0, 1.0]),
-              mix_o2=0.9, filter_envamt=0.35, env1_d=0.3, env1_s=0.8,
-              amp_drive=rng.uniform(0.4, 0.65), amp_dist=1)
-    v0 = {"voice_detune": rng.uniform(0.5, 0.7), "voice_poly": 1,  # unison spread
-          "voice_portamento": 0.0}  # tight retrigger: never drift
-    return t1, {}, {"song_tempo": 174.0, **v0}
-
-
-def r_wobble(rng, v, tempo=140):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.45, 0.6), rng.uniform(0.35, 0.6), octv=-1)
-    div = rng.choice(["1/8", "1/8", "1/4", "1/16"])
-    t1.update(lfo1_wave=L_SQR if v % 2 else L_SAW, lfo1_sync=SYNC_DIV[div],
-              lfo1_depth=0.7, mod1_src=2, mod1_dst=4,
-              mod1_amt=rng.uniform(0.5, 0.8),
-              osc2_wave=W_SAW, osc2_level=0.7, osc2_fine=rng.uniform(-12, 12),
-              mix_o2=0.7, amp_drive=rng.uniform(0.35, 0.6), amp_dist=1,
-              env1_s=0.9, env1_d=0.2)
-    return t1, {}, {"song_tempo": float(tempo)}
-
-
-def r_growl(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.4, 0.55), rng.uniform(0.4, 0.65), octv=-1,
-                 wave=W_DIG)
-    t1.update(osc1_digital=rng.choice(DIG[3] + DIG[5]),
-              osc1_xmod=rng.uniform(0.4, 0.8), osc1_shape=rng.uniform(0.2, 0.5),
-              lfo1_wave=L_SAW, lfo1_rate=rng.uniform(0.55, 0.75), lfo1_depth=0.6,
-              mod1_src=2, mod1_dst=2, mod1_amt=rng.uniform(0.3, 0.6),
-              mod2_src=2, mod2_dst=4, mod2_amt=rng.uniform(0.3, 0.5),
-              amp_drive=rng.uniform(0.4, 0.7), amp_dist=1,
-              fm_amt=rng.uniform(0.15, 0.3), # FM snarl under the growl
-              env1_s=0.9, env1_d=0.25)
-    return t1, {}, {"song_tempo": float(rng.choice([140, 145, 150]))}
-
-
-def r_gritty(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.3, 0.45), rng.uniform(0.3, 0.55), octv=-1,
-                 wave=W_SQR if v % 2 else W_SAW)
-    t1.update(amp_drive=rng.uniform(0.35, 0.65), amp_dist=1,
-              filter_envamt=0.55, env1_d=rng.uniform(0.12, 0.22), env1_s=0.5,
-              osc1_pwm=rng.uniform(0.25, 0.45))
-    return t1, {}, {"song_tempo": float(rng.choice([124, 126, 128]))}
-
-
-def r_house_bass(rng, v):
-    t1 = base_timbre()
-    _bass_common(t1, rng, rng.uniform(0.35, 0.5), rng.uniform(0.1, 0.3), octv=-1,
-                 wave=rng.choice([W_SAW, W_SQR, W_SQR]))
-    t1.update(env1_d=rng.uniform(0.1, 0.2), env1_s=rng.uniform(0.4, 0.7),
-              filter_envamt=0.45, amp_velocity=0.4,
-              amp_drive=rng.uniform(0.2, 0.35), amp_dist=1)
-    sh = {"song_tempo": float(rng.choice([122, 124, 126, 128]))}
-    space(sh, rng, chorus=False, delay=rng.random() < 0.25)
-    return t1, {}, sh
-
-
-def r_lead_saw(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_level=0.8,
-              osc2_fine=rng.uniform(6, 14), mix_o2=0.8,
-              filter_cutoff=rng.uniform(0.65, 0.9), filter_reso=rng.uniform(0.1, 0.3),
-              filter_envamt=0.3, env1_a=0.02, env1_d=0.25, env1_s=0.8,
-              filter_keytrack=0.5)
-    if rng.random() < 0.4:
-        t1.update(osc2_wave=W_DIG, osc2_digital=rng.choice(DIG[5]),
-                  osc2_level=0.5, osc2_fine=rng.uniform(-5, 5))
-    v0 = {"voice_detune": rng.uniform(0.2, 0.4), "voice_poly": 1,
-          "voice_portamento": 0.0}
-    sh = {}
-    space(sh, rng, chorus=True, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_lead_sync(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc_mod=2, osc1_xmod=rng.uniform(0.3, 0.6),
-              osc2_wave=W_SAW, osc2_level=0.8, osc2_fine=4.0, mix_o2=0.8,
-              filter_cutoff=rng.uniform(0.5, 0.7), filter_reso=rng.uniform(0.3, 0.5),
-              filter_envamt=0.5, env1_a=0.0, env1_d=0.3, env1_s=0.7,
-              amp_drive=0.25, amp_dist=1 if v % 2 else 0)
-    return t1, {}, {"voice_detune": rng.uniform(0.1, 0.25), "voice_poly": 1}
-
-
-def r_lead_square(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SQR, osc1_pwm=rng.uniform(0.25, 0.4),
-              osc2_wave=W_SQR, osc2_level=0.6, osc2_fine=6.0, mix_o2=0.6,
-              filter_cutoff=rng.uniform(0.6, 0.85), filter_reso=0.15,
-              filter_envamt=0.25)
-    v0 = {"voice_vib": rng.uniform(0.1, 0.3), "voice_poly": 1,
-          "voice_portamento": 0.0}
-    sh = {}
-    space(sh, rng, chorus=True, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_lead_vox(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_DIG, osc1_digital=rng.choice(DIG[4]),
-              osc1_shape=rng.uniform(0.2, 0.5),
-              filter_cutoff=0.7, filter_reso=0.2, filter_envamt=0.3,
-              # formant wobble (shape), not pitch: constant vibrato on a
-              # vocal timbre reads as broken tuning
-              lfo1_wave=L_SIN, lfo1_rate=0.45, lfo1_depth=0.3,
-              mod1_src=2, mod1_dst=2, mod1_amt=rng.uniform(0.3, 0.5),
-              mod2_src=2, mod2_dst=0, mod2_amt=0.0,
-              osc2_wave=W_SIN, osc2_octave=1, osc2_level=0.3, mix_o2=0.3)
-    return t1, {}, {"voice_vib": 0.25, "voice_poly": 1}
-
-
-def r_pad(rng, v, bright=0.5):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_level=0.8, mix_o2=0.8,
-              osc2_fine=rng.uniform(-10, 10))
-    if rng.random() < 0.34:
-        # square fifth instead of plain doubling
-        t1.update(osc2_wave=W_SQR, osc2_pitch=7, osc2_level=0.6)
-    t1.update(
-              filter_cutoff=rng.uniform(bright - 0.15, bright + 0.15),
-              filter_reso=rng.uniform(0.05, 0.2),
-              env1_a=rng.uniform(0.15, 0.3), env1_d=0.3, env1_s=0.9, env1_r=0.4,
-              env2_a=rng.uniform(0.15, 0.3), env2_d=0.2, env2_s=0.9, env2_r=0.4,
-              filter_envamt=0.2)
-    v0 = {"voice_poly": rng.choice([4, 6, 8]), "voice_detune": rng.uniform(0.15, 0.35)}
-    sh = {}
-    space(sh, rng, chorus=True, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_strings(rng, v):
-    t1, _, sh = r_pad(rng, v, bright=0.6)
-    t1.update(env1_a=rng.uniform(0.15, 0.3), env2_a=t1["env1_a"],
-              osc1_wave=W_SAW, filter_keytrack=0.4)
-    return t1, {}, sh
-
-
-def _pad_env(t1, rng, slow=0.25):
-    # Present from the first beat: audible attack, still a swell.
-    t1.update(env1_a=rng.uniform(slow - 0.1, slow + 0.1),
-              env1_d=0.3, env1_s=0.9, env1_r=rng.uniform(0.4, 0.6),
-              env2_a=t1.get("env1_a", slow), env2_d=0.2, env2_s=0.9,
-              env2_r=rng.uniform(0.4, 0.6))
-
-
-def r_pad_air(rng, v):
-    # Airy bandpass/highpass wash with zero moving pitch sources: no LFO
-    # routings at all. Motion comes only from phaser (allpass: no pitch
-    # shift) + delay. Saws, not triangles: a highpass has nothing to pass
-    # from harmonic-poor waves (triangle C3 through 1 kHz HP is -36 dB).
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_octave=1, osc2_level=0.6,
-              mix_o2=0.6, osc2_fine=rng.uniform(-6, 6),
-              filter_type=rng.choice([F_BP12, F_HP12]),
-              filter_cutoff=rng.uniform(0.35, 0.55),
-              filter_reso=rng.uniform(0.08, 0.18), filter_envamt=0.15)
-    _pad_env(t1, rng)
-    sh = {"modfx_type": 3, "modfx_rate": rng.uniform(0.08, 0.18),
-          "modfx_depth": rng.uniform(0.2, 0.35), "modfx_mix": rng.uniform(0.15, 0.3),
-          "delay_type": 2, "delay_time": rng.uniform(0.3, 0.45),
-          "delay_feedback": rng.uniform(0.2, 0.3),
-          "delay_mix": rng.uniform(0.1, 0.2)}
-    v0 = {"voice_poly": rng.choice([4, 6, 8]),
-          "voice_detune": rng.uniform(0.1, 0.2)}
-    return t1, {}, {**sh, **v0}
-
-
-def r_pad_glass(rng, v):
-    # Crystalline digital over a sine sub, shimmering shape drift.
-    fam = rng.choice([2, 2, 5, 1])
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_DIG, osc1_digital=rng.choice(DIG[fam]),
-              osc1_octave=1, osc2_wave=W_SIN, osc2_octave=-1, osc2_level=0.5,
-              mix_o2=0.5, filter_cutoff=rng.uniform(0.55, 0.8),
-              filter_reso=0.05, filter_envamt=0.1,
-              lfo1_wave=L_SIN, lfo1_rate=rng.uniform(0.12, 0.3), lfo1_depth=0.4,
-              mod1_src=2, mod1_dst=2, mod1_amt=rng.uniform(0.2, 0.35))
-    _pad_env(t1, rng, slow=0.25)
-    v0 = {"voice_poly": rng.choice([4, 6, 8]),
-          "voice_detune": rng.uniform(0.08, 0.2)}
-    sh = {}
-    space(sh, rng, chorus=False, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_pad_pulse(rng, v):
-    # PWM string machine: squares a fifth apart, breathing width, phaser.
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SQR, osc1_pwm=rng.uniform(0.25, 0.4),
-              osc2_wave=W_SQR, osc2_pitch=7, osc2_level=0.7, mix_o2=0.7,
-              osc2_pwm=rng.uniform(0.25, 0.4),
-              filter_cutoff=rng.uniform(0.5, 0.7),
-              filter_reso=rng.uniform(0.05, 0.15), filter_envamt=0.2,
-              lfo1_wave=L_TRI, lfo1_rate=rng.uniform(0.1, 0.22), lfo1_depth=0.5,
-              mod1_src=2, mod1_dst=2, mod1_amt=rng.uniform(0.25, 0.4))
-    _pad_env(t1, rng, slow=0.35)
-    v0 = {"voice_poly": rng.choice([4, 6]), "voice_detune": rng.uniform(0.12, 0.25)}
-    sh = {"modfx_type": 3, "modfx_rate": rng.uniform(0.1, 0.25),
-          "modfx_depth": rng.uniform(0.3, 0.5), "modfx_mix": rng.uniform(0.2, 0.35)}
-    space(sh, rng, chorus=False, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_pad_fifth(rng, v):
-    # Dark evolving fifth stack: low cutoff that opens slowly under the chord.
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_pitch=7, osc2_level=0.8,
-              mix_o2=0.8, osc2_fine=rng.uniform(-6, 6),
-              filter_cutoff=rng.uniform(0.3, 0.45),
-              filter_reso=rng.uniform(0.15, 0.3),
-              filter_envamt=rng.uniform(0.35, 0.55),
-              env1_a=rng.uniform(0.25, 0.4), env1_d=0.4, env1_s=0.85,
-              env1_r=rng.uniform(0.4, 0.6),
-              env2_a=0.3, env2_d=0.2, env2_s=0.9,
-              env2_r=rng.uniform(0.4, 0.6))
-    v0 = {"voice_poly": rng.choice([4, 6, 8]),
-          "voice_detune": rng.uniform(0.15, 0.3)}
-    sh = {}
-    space(sh, rng, chorus=True, delay=True)
-    return t1, {}, {**sh, **v0}
-
-
-def r_pad_voxpad(rng, v):
-    # Fixed-vowel wash: the vowel is chosen, never morphed (morph LFOs read
-    # as pitch drift on formants). Motion comes only from phaser + delay.
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_DIG, osc1_digital=rng.choice(DIG[4]),
-              osc1_shape=rng.uniform(0.35, 0.55),
-              osc2_wave=W_TRI, osc2_level=0.4, mix_o2=0.4,
-              filter_cutoff=rng.uniform(0.55, 0.7),
-              filter_reso=0.1, filter_envamt=0.15)
-    _pad_env(t1, rng, slow=0.25)
-    sh = {"modfx_type": 3, "modfx_rate": rng.uniform(0.08, 0.15),
-          "modfx_depth": rng.uniform(0.25, 0.4), "modfx_mix": rng.uniform(0.2, 0.3),
-          "delay_type": 2, "delay_time": rng.uniform(0.3, 0.45),
-          "delay_feedback": 0.25, "delay_mix": 0.15}
-    v0 = {"voice_poly": rng.choice([6, 8]),
-          "voice_detune": rng.uniform(0.1, 0.2)}
-    return t1, {}, {**sh, **v0}
-
-
-def r_arp(rng, v, tempo=138, wave=W_SAW):
-    t1 = base_timbre()
-    t1.update(osc1_wave=wave,
-              osc1_digital=rng.choice(DIG[0] + DIG[5]) if wave == W_DIG else 0,
-              filter_cutoff=rng.uniform(0.55, 0.8), filter_reso=rng.uniform(0.1, 0.3),
-              filter_envamt=0.35, env1_a=0.0, env1_d=0.2, env1_s=0.4, env1_r=0.15,
-              env2_a=0.0, env2_d=0.1, env2_s=0.6, env2_r=0.1)
-    if rng.random() < 0.5:
-        t1.update(osc2_wave=rng.choice([W_SAW, W_SQR]), osc2_level=0.6,
-                  osc2_octave=rng.choice([0, 1]),
-                  osc2_pitch=rng.choice([0, 0, 7]), mix_o2=0.5)
-    sh = {}
-    arp_on(sh, rng, tempo, rate=rng.choice(["1/16", "1/16", "1/8", "1/8T"]),
-           gate=rng.uniform(0.5, 0.7), octs=rng.choice([1, 1, 2]))
-    space(sh, rng, chorus=rng.random() < 0.4, delay=True)
-    return t1, {}, sh
-
-
-def r_seq(rng, v, tempo=120):
-    t1, _, sh = r_arp(rng, v, tempo=tempo,
-                      wave=rng.choice([W_SAW, W_SQR, W_DIG]))
-    sh["arp_latch"] = 1
-    t1["mod2_src"] = 0
-    t1["mod2_dst"] = 4
-    t1["mod2_amt"] = rng.uniform(0.1, 0.3)
-    return t1, {}, sh
-
-
-def r_ep(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SIN, osc2_wave=W_SIN, osc2_octave=1, osc2_level=0.4,
-              mix_o2=0.4, filter_cutoff=0.7, filter_reso=0.05,
-              env2_a=0.0, env2_d=rng.uniform(0.3, 0.5), env2_s=0.3, env2_r=0.25,
-              lfo1_wave=L_SIN, lfo1_rate=0.5, lfo1_depth=0.25,
-              mod1_src=2, mod1_dst=6, mod1_amt=rng.uniform(0.1, 0.2),
-              amp_velocity=0.6,
-              fm_amt=rng.uniform(0.25, 0.5)) # sine->sine DX-style bite
-    return t1, {}, {"voice_poly": 6}
-
-
-def r_organ(rng, v, drive=0.0):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SIN, osc2_wave=W_SIN, osc2_octave=1, osc2_level=0.6,
-              mix_o2=0.6, filter_cutoff=0.85, env2_a=0.0, env2_d=0.05,
-              env2_s=1.0, env2_r=0.05, amp_drive=drive,
-              amp_dist=1 if drive > 0.3 else 0, amp_velocity=0.3)
-    sh = {}
-    space(sh, rng, chorus=True, delay=False)
-    return t1, {}, {**sh, "voice_poly": 8}
-
-
-def r_clav(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SQR, osc1_pwm=rng.uniform(0.15, 0.3),
-              osc2_wave=W_SQR, osc2_level=0.4, osc2_fine=5.0, mix_o2=0.4,
-              filter_cutoff=0.75, filter_reso=0.1, filter_envamt=0.4,
-              env2_a=0.0, env2_d=rng.uniform(0.2, 0.35), env2_s=0.2, env2_r=0.1,
-              amp_velocity=0.5)
-    return t1, {}, {"voice_poly": 6}
-
-
-def r_bell(rng, v):
-    t1 = base_timbre()
-    fam = rng.choice([2, 2, 1, 5])
-    t1.update(osc1_wave=W_DIG, osc1_digital=rng.choice(DIG[fam]),
-              osc1_octave=rng.choice([0, 1]), filter_cutoff=0.8,
-              env2_a=0.0, env2_d=rng.uniform(0.4, 0.6), env2_s=0.1,
-              env2_r=rng.uniform(0.4, 0.6),
-              fm_amt=rng.uniform(0.15, 0.35)) # metallic FM shimmer
-    if rng.random() < 0.6:
-        t1.update(osc2_wave=W_SIN, osc2_octave=-1, osc2_level=0.4, mix_o2=0.4)
-    sh = {}
-    space(sh, rng, chorus=False, delay=True)
-    return t1, {}, {**sh, "voice_poly": 8}
-
-
-def r_pluck(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=rng.choice([W_SAW, W_SQR, W_TRI, W_DIG]),
-              osc1_digital=rng.choice(DIG[6] + DIG[0]) if t1["osc1_wave"] == W_DIG else 0,
-              filter_cutoff=rng.uniform(0.6, 0.85), filter_reso=0.1,
-              filter_envamt=rng.uniform(0.4, 0.65),
-              env1_a=0.0, env1_d=rng.uniform(0.15, 0.3), env1_s=0.1, env1_r=0.15,
-              env2_a=0.0, env2_d=rng.uniform(0.15, 0.3), env2_s=0.2, env2_r=0.15,
-              amp_velocity=0.5)
-    if rng.random() < 0.3:
-        t1.update(osc2_wave=W_SAW, osc2_pitch=7, osc2_level=0.5, mix_o2=0.4)
-    sh = {}
-    space(sh, rng, chorus=False, delay=True)
-    return t1, {}, {**sh, "voice_poly": 4}
-
-
-def r_stab(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=rng.choice([W_SAW, W_SQR]),
-              osc2_level=0.8, mix_o2=0.8, osc2_fine=rng.uniform(-8, 8),
-              filter_cutoff=rng.uniform(0.5, 0.7), filter_reso=0.25,
-              filter_envamt=0.5, env1_a=0.0, env1_d=0.12, env1_s=0.1, env1_r=0.1,
-              env2_a=0.0, env2_d=0.12, env2_s=0.2, env2_r=0.1)
-    return t1, {}, {"voice_poly": rng.choice([3, 4, 6])}
-
-
-def r_brass(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, osc2_wave=W_SAW, osc2_level=0.7, mix_o2=0.7,
-              osc2_fine=5.0, filter_cutoff=0.6, filter_reso=0.1,
-              filter_envamt=0.4, env1_a=rng.uniform(0.05, 0.12), env1_d=0.2,
-              env1_s=0.85, env1_r=0.15, env2_a=0.05, env2_d=0.15, env2_s=0.9)
-    return t1, {}, {"voice_poly": 6}
-
-
-def r_choir(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_DIG, osc1_digital=rng.choice(DIG[4]),
-              osc1_shape=rng.uniform(0.1, 0.4), osc2_wave=W_SIN, osc2_level=0.4,
-              mix_o2=0.4, filter_cutoff=0.65, filter_reso=0.1,
-              env1_a=0.2, env1_d=0.3, env1_s=0.9, env1_r=0.35,
-              env2_a=0.2, env2_d=0.2, env2_s=0.9, env2_r=0.35,
-              lfo1_wave=L_SIN, lfo1_rate=0.4, lfo1_depth=0.2,
-              mod1_src=2, mod1_dst=2, mod1_amt=rng.uniform(0.2, 0.3))
-    sh = {}
-    space(sh, rng, chorus=True, delay=True)
-    return t1, {}, {**sh, "voice_poly": 8,
-                    "voice_detune": rng.uniform(0.1, 0.25)}
-
-
-def r_sfx(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=rng.choice([W_SAW, W_DIG, W_NOI]),
-              osc1_digital=rng.choice(DIG[3] + DIG[7]),
-              mix_noise=rng.uniform(0.3, 0.8),
-              filter_cutoff=rng.uniform(0.3, 0.9), filter_reso=rng.uniform(0.3, 0.7),
-              lfo1_wave=L_RND, lfo1_rate=rng.uniform(0.4, 0.8), lfo1_depth=0.8,
-              mod1_src=3, mod1_dst=4, mod1_amt=rng.uniform(0.3, 0.7),
-              env1_a=rng.uniform(0.0, 0.4), env1_d=0.3, env1_s=0.5, env1_r=0.4,
-              env2_a=rng.uniform(0.0, 0.4), env2_d=0.3, env2_s=0.6, env2_r=0.4,
-              amp_drive=rng.uniform(0.2, 0.5), amp_dist=1 if v % 2 else 0)
-    sh = {}
-    space(sh, rng, chorus=rng.random() < 0.3, delay=rng.random() < 0.4)
-    return t1, {}, {**sh, "voice_poly": 1}
-
-
-def r_hit(rng, v):
-    t1, _, sh = r_stab(rng, v)
-    t1.update(mix_noise=rng.uniform(0.1, 0.3), amp_drive=0.3, amp_dist=1,
-              env2_r=0.3)
-    return t1, {}, sh
-
-
-def r_riser(rng, v, up=True):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SAW, mix_noise=0.6, filter_type=F_LP24,
-              filter_cutoff=0.15 if up else 0.9, filter_reso=0.4,
-              env1_a=0.7, env1_d=0.2, env1_s=1.0 if up else 0.0, env1_r=0.3,
-              filter_envamt=0.8 if up else -0.6,
-              env2_a=0.7 if up else 0.0, env2_d=0.2, env2_s=1.0, env2_r=0.3)
-    return t1, {}, {"voice_poly": 1}
-
-
-def r_kick808(rng, v):
-    t1 = base_timbre()
-    t1.update(osc1_wave=W_SIN, osc1_octave=-2, filter_cutoff=0.5,
-              env2_a=0.0, env2_d=rng.uniform(0.35, 0.55), env2_s=0.0,
-              env2_r=0.1, mix_noise=0.08, amp_drive=0.25, amp_dist=1)
-    return t1, {}, {"voice_poly": 1}
-
-
-def r_lofi(rng, v):
-    t1, _, sh = r_ep(rng, v)
-    t1.update(filter_cutoff=0.55, amp_drive=0.3, amp_dist=1,
-              lfo1_wave=L_SIN, lfo1_rate=0.35, lfo1_depth=0.3,
-              mod1_src=2, mod1_dst=6, mod1_amt=rng.uniform(0.1, 0.2))
-    return t1, {}, sh
-
-
-# name, recipe, layer-style (None = near-copy T2, tmix 0)
-PATCHES = [
-    ("Init", r_init, None, {}),
-    ("Init Lead", r_init_lead, None, {}),
-    ("Init Sub", r_sub, None, {}),
-    ("Init Pad", r_pad, "wide", {"tmix": 0.5}),
-    ("Init Spark", r_arp, None, {"song_tempo": 120.0}),
-    # TRANCE (32)
-    ("Neon Ascension", r_arp, None, {"song_tempo": 138.0}),
-    ("Euphoria Engine", r_lead_saw, "wide", {"tmix": 0.5}),
-    ("Skyline Runner", r_arp, None, {"song_tempo": 140.0}),
-    ("Aurora Anthem", r_lead_saw, None, {}),
-    ("Sunset Gate", r_pad_fifth, "wide", {"tmix": 0.5}),
-    ("Airwave Dream", r_lead_square, None, {}),
-    ("Luminous Drift", r_pad_air, "octave_up", {"tmix": 0.5}),
-    ("Cascade Heaven", r_arp, "octave_up", {"tmix": 0.5, "song_tempo": 138.0}),
-    ("Afterhours Glow", r_pad_air, None, {}),
-    ("Serotonin Rush", r_arp, None, {"song_tempo": 142.0}),
-    ("Cloudsurfer", r_lead_saw, None, {}),
-    ("Halo Circuit", r_seq, None, {"song_tempo": 138.0}),
-    ("Velvet Sunrise", r_pad_pulse, "wide", {"tmix": 0.5}),
-    ("Starlight Drive", r_lead_sync, None, {}),
-    ("Open Air", r_arp, None, {"song_tempo": 136.0}),
-    ("Till Dawn", r_pad_pulse, None, {}),
-    ("Eternity Chord", r_strings, "wide", {"tmix": 0.5}),
-    ("Hands Up", r_lead_saw, "octave_up", {"tmix": 0.5}),
-    ("Baltic Breeze", r_arp, None, {"song_tempo": 138.0}),
-    ("Solaris Flare", r_lead_sync, None, {}),
-    ("Dreamstate", r_pad, "dark", {"tmix": 0.5}),
-    ("Nightflight", r_seq, None, {"song_tempo": 140.0}),
-    ("Pure Elevation", r_lead_saw, None, {}),
-    ("Moonlit Terrace", r_arp, None, {"song_tempo": 134.0}),
-    ("Gravity Choir", r_choir, "wide", {"tmix": 0.5}),
-    ("Illuminate", r_lead_square, "octave_up", {"tmix": 0.5}),
-    ("White Island", r_arp, None, {"song_tempo": 138.0}),
-    ("Unity Chant", r_pad_pulse, "wide", {"tmix": 0.5}),
-    ("Overdrive Hymn", r_lead_saw, None, {}),
-    ("Blue Horizon", r_arp, "octave_up", {"tmix": 0.5, "song_tempo": 137.0}),
-    ("Ever Young", r_strings, None, {}),
-    ("Anthem Peak", r_lead_saw, "wide", {"tmix": 0.5}),
-    # TECHNO / HOUSE (36)
-    ("Warehouse Pulse", r_house_bass, None, {"song_tempo": 132.0}),
-    ("Concrete Groove", r_house_bass, None, {"song_tempo": 130.0}),
-    ("Rotterdam Raw", r_gritty, None, {"song_tempo": 145.0}),
-    ("Acid Rainline", r_acid, None, {"song_tempo": 135.0}),
-    ("Jack Track", r_house_bass, None, {"song_tempo": 124.0}),
-    ("Rave Stabber", r_stab, None, {"song_tempo": 140.0}),
-    ("Loft Party", r_arp, None, {"song_tempo": 122.0}),
-    ("Basement Cut", r_house_bass, None, {"song_tempo": 128.0}),
-    ("Needle Drop", r_lead_sync, None, {}),
-    ("Peak Time Driver", r_gritty, None, {"song_tempo": 138.0}),
-    ("Hypnotik Loop", r_seq, None, {"song_tempo": 132.0}),
-    ("Dusty Groove", r_lofi, None, {}),
-    ("Metal Box", r_sfx, None, {}),
-    ("Siren Test", r_sfx, None, {}),
-    ("Smoke Machine", r_pad, "dark", {"tmix": 0.5}),
-    ("Four AM Floor", r_house_bass, None, {"song_tempo": 126.0}),
-    ("Bleep Test", r_sfx, None, {}),
-    ("Rave Whistle", r_lead_square, None, {}),
-    ("Overdrive Unit", r_gritty, None, {"song_tempo": 140.0}),
-    ("Monotone", r_house_bass, None, {"song_tempo": 133.0}),
-    ("Filter Freak", r_acid, None, {"song_tempo": 130.0}),
-    ("Clap Back", r_hit, None, {}),
-    ("Shuffle Play", r_arp, None, {"song_tempo": 124.0}),
-    ("Deep Pan", r_sub, None, {}),
-    ("Sub Terrain", r_sub, None, {}),
-    ("Ghost Note", r_house_bass, None, {"song_tempo": 127.0}),
-    ("Rave Cave", r_pad, "dark", {"tmix": 0.5}),
-    ("Strobe Light", r_arp, None, {"song_tempo": 140.0}),
-    ("Power Chord", r_stab, "octave_down", {"tmix": 0.5}),
-    ("Loopy Lou", r_seq, None, {"song_tempo": 128.0}),
-    ("Analog Riot", r_lead_saw, None, {}),
-    ("Bassbin", r_sub, None, {}),
-    ("Night Shift", r_house_bass, None, {"song_tempo": 125.0}),
-    ("Sweatbox", r_acid, None, {"song_tempo": 138.0}),
-    ("Encore", r_lead_saw, "wide", {"tmix": 0.5}),
-    ("Last Train", r_pad, None, {}),
-    # BASS HOUSE (24)
-    ("Gutter Riddim", r_gritty, None, {"song_tempo": 126.0}),
-    ("Wobble Dome", r_wobble, None, {"song_tempo": 126.0}),
-    ("Low Slung", r_house_bass, None, {"song_tempo": 125.0}),
-    ("Grease Trap", r_gritty, None, {"song_tempo": 127.0}),
-    ("Donk Chamber", r_gritty, None, {"song_tempo": 128.0}),
-    ("Jackin Box", r_house_bass, None, {"song_tempo": 126.0}),
-    ("Rinse Cycle", r_wobble, None, {"song_tempo": 124.0}),
-    ("Filthy Habit", r_gritty, None, {"song_tempo": 125.0}),
-    ("Bumpy Night", r_house_bass, None, {"song_tempo": 127.0}),
-    ("Wobble Wagon", r_wobble, None, {"song_tempo": 128.0}),
-    ("Distorted Reality", r_gritty, "octave_down", {"tmix": 0.5, "song_tempo": 126.0}),
-    ("Sub Contract", r_sub, None, {}),
-    ("Bounce House", r_house_bass, None, {"song_tempo": 128.0}),
-    ("Grime Time", r_growl, None, {"song_tempo": 126.0}),
-    ("Wobble Board", r_wobble, None, {"song_tempo": 125.0}),
-    ("Speaker Box", r_gritty, None, {"song_tempo": 127.0}),
-    ("Sleazy Rider", r_house_bass, None, {"song_tempo": 124.0}),
-    ("Fidget Factor", r_gritty, None, {"song_tempo": 128.0}),
-    ("Wobble Theory", r_wobble, None, {"song_tempo": 126.0}),
-    ("Bassline Criminal", r_gritty, None, {"song_tempo": 125.0}),
-    ("Ruffneck", r_growl, None, {"song_tempo": 127.0}),
-    ("Shuffle Demon", r_house_bass, None, {"song_tempo": 126.0}),
-    ("Low End Leader", r_sub, "octave_down", {"tmix": 0.5}),
-    ("Wobble Outro", r_wobble, None, {"song_tempo": 124.0}),
-    # DUBSTEP (32)
-    ("Tearout Titan", r_growl, None, {"song_tempo": 150.0}),
-    ("Wobble Monster", r_wobble, None, {"song_tempo": 140.0}),
-    ("Dungeon Crawl", r_sub, "dark", {"tmix": 0.5, "song_tempo": 140.0}),
-    ("Riddim Kid", r_gritty, None, {"song_tempo": 145.0}),
-    ("Growl Garden", r_growl, None, {"song_tempo": 140.0}),
-    ("Bass Howitzer", r_gritty, "octave_down", {"tmix": 0.5, "song_tempo": 150.0}),
-    ("Wub Machine", r_wobble, None, {"song_tempo": 142.0}),
-    ("Mechanical Maw", r_growl, None, {"song_tempo": 148.0}),
-    ("Deep Meditation", r_sub, None, {"song_tempo": 140.0}),
-    ("Wobble Warden", r_wobble, None, {"song_tempo": 140.0}),
-    ("Laser Guided", r_growl, None, {"song_tempo": 150.0}),
-    ("Submerged", r_sub, "dark", {"tmix": 0.5, "song_tempo": 142.0}),
-    ("Chainsaw Ballet", r_growl, "octave_down", {"tmix": 0.5, "song_tempo": 150.0}),
-    ("Wobble Goblin", r_wobble, None, {"song_tempo": 138.0}),
-    ("Bass Pressure", r_gritty, None, {"song_tempo": 140.0}),
-    ("Growl Power", r_growl, None, {"song_tempo": 145.0}),
-    ("Half Time Hero", r_sub, None, {"song_tempo": 140.0}),
-    ("Wobble Circus", r_wobble, None, {"song_tempo": 144.0}),
-    ("Metal Mouth", r_growl, None, {"song_tempo": 150.0}),
-    ("Abyss Walker", r_sub, "dark", {"tmix": 0.5, "song_tempo": 138.0}),
-    ("Riddim Royale", r_gritty, None, {"song_tempo": 148.0}),
-    ("Wobble Sauce", r_wobble, None, {"song_tempo": 140.0}),
-    ("Transistor Form", r_growl, None, {"song_tempo": 142.0}),
-    ("Sub Freezing", r_sub, None, {"song_tempo": 140.0}),
-    ("Bass Face", r_gritty, None, {"song_tempo": 150.0}),
-    ("Growl School", r_growl, None, {"song_tempo": 140.0}),
-    ("Wobble Works", r_wobble, None, {"song_tempo": 146.0}),
-    ("Cellar Dweller", r_sub, "dark", {"tmix": 0.5, "song_tempo": 140.0}),
-    ("Riddim Reactor", r_growl, None, {"song_tempo": 148.0}),
-    ("Wobble Warrior", r_wobble, None, {"song_tempo": 140.0}),
-    ("Guttural", r_growl, "octave_down", {"tmix": 0.5, "song_tempo": 145.0}),
-    ("Weight Plate", r_gritty, None, {"song_tempo": 140.0}),
-    # DNB / JUNGLE (32)
-    ("Reese Criminal", r_reese, None, {}),
-    ("Techstep Terror", r_reese, "dark", {"tmix": 0.5}),
-    ("Jungle Protocol", r_house_bass, None, {"song_tempo": 170.0}),
-    ("Breakbeat Science", r_stab, None, {"song_tempo": 170.0}),
-    ("Reese Lightning", r_reese, "wide", {"tmix": 0.5}),
-    ("Neurotic Funk", r_growl, None, {"song_tempo": 174.0}),
-    ("Liquid Soul", r_pad, "wide", {"tmix": 0.5}),
-    ("Reese Reserve", r_reese, None, {}),
-    ("Valve Room", r_sub, None, {"song_tempo": 170.0}),
-    ("Dark Roller", r_reese, "dark", {"tmix": 0.5}),
-    ("Reese Wraith", r_reese, "octave_up", {"tmix": 0.5}),
-    ("Chopped Break", r_stab, None, {"song_tempo": 168.0}),
-    ("Techstep Tunnel", r_growl, None, {"song_tempo": 172.0}),
-    ("Reese Heritage", r_reese, None, {}),
-    ("Jungle Calls", r_lead_square, None, {}),
-    ("Sub Assault", r_sub, "octave_down", {"tmix": 0.5, "song_tempo": 174.0}),
-    ("Reese Monsoon", r_reese, "wide", {"tmix": 0.5}),
-    ("Halfstepper", r_sub, None, {"song_tempo": 170.0}),
-    ("Container Ship", r_gritty, None, {"song_tempo": 172.0}),
-    ("Reese Anatomy", r_reese, None, {}),
-    ("Ninety Four", r_house_bass, None, {"song_tempo": 168.0}),
-    ("Stratosphere", r_pad, "octave_up", {"tmix": 0.5}),
-    ("Reese Riot", r_reese, "octave_down", {"tmix": 0.5}),
-    ("Ragga Tip", r_house_bass, None, {"song_tempo": 170.0}),
-    ("Reese Relic", r_reese, None, {}),
-    ("Drum Funk", r_stab, None, {"song_tempo": 172.0}),
-    ("Reese Runner", r_reese, None, {}),
-    ("Green Valley", r_pad, None, {}),
-    ("Reese Ransom", r_reese, "wide", {"tmix": 0.5}),
-    ("Jump Up Junkie", r_gritty, None, {"song_tempo": 174.0}),
-    ("Reese Radiance", r_reese, "octave_up", {"tmix": 0.5}),
-    ("Intelligent Waves", r_pad, "wide", {"tmix": 0.5}),
-    # ELECTRONICA / IDM (28)
-    ("Glitch Ghost", r_sfx, None, {}),
-    ("Bleep Census", r_sfx, None, {"song_tempo": 100.0}),
-    ("Grain Storm", r_sfx, "wide", {"tmix": 0.5}),
-    ("IDM Dream", r_pad_voxpad, None, {}),
-    ("Stutter Step", r_seq, None, {"song_tempo": 128.0}),
-    ("Bit Crush Hour", r_gritty, None, {"song_tempo": 110.0}),
-    ("Warped Factor", r_growl, None, {"song_tempo": 120.0}),
-    ("Mind Acrobat", r_sfx, None, {}),
-    ("Drill Sergeant", r_gritty, None, {"song_tempo": 160.0}),
-    ("Ambient Volunteer", r_pad_voxpad, "wide", {"tmix": 0.5}),
-    ("Click Track", r_sfx, None, {}),
-    ("Generative Study", r_seq, None, {"song_tempo": 100.0}),
-    ("Modem Noise", r_sfx, None, {}),
-    ("Ghost Frequencies", r_pad_voxpad, "dark", {"tmix": 0.5}),
-    ("Microsound", r_sfx, None, {}),
-    ("Folding Sine", r_ep, None, {}),
-    ("Data Garden", r_arp, None, {"song_tempo": 110.0}),
-    ("Glass Lazers", r_lead_sync, None, {}),
-    ("Polygon Park", r_pad, None, {}),
-    ("Vowel Soup", r_lead_vox, None, {}),
-    ("Tape Loop", r_lofi, None, {}),
-    ("Bent Circuit", r_sfx, None, {}),
-    ("Sleep Research", r_pad, "dark", {"tmix": 0.5}),
-    ("Reflex Test", r_seq, None, {"song_tempo": 132.0}),
-    ("Slow Motion", r_pad, None, {"song_tempo": 80.0}),
-    ("Wonky Tonk", r_lofi, None, {"song_tempo": 95.0}),
-    ("Future Carpark", r_gritty, None, {"song_tempo": 130.0}),
-    ("Skwee Ball", r_lead_square, None, {}),
-    # HIPHOP / TRAP / VINTAGE (32)
-    ("808 Menace", r_kick808, "octave_down", {"tmix": 0.5}),
-    ("Dirty Third", r_gritty, None, {"song_tempo": 90.0}),
-    ("Boom Clap", r_hit, None, {"song_tempo": 92.0}),
-    ("Westside Glide", r_lead_saw, None, {"song_tempo": 90.0}),
-    ("Memphis Grit", r_gritty, None, {"song_tempo": 88.0}),
-    ("Trap Door", r_kick808, None, {"song_tempo": 140.0}),
-    ("808 Lullaby", r_kick808, None, {"song_tempo": 70.0}),
-    ("Crunked Up", r_gritty, "octave_down", {"tmix": 0.5, "song_tempo": 95.0}),
-    ("Chopped Late", r_lofi, None, {"song_tempo": 85.0}),
-    ("Valley Whistle", r_lead_square, None, {}),
-    ("808 Avalanche", r_kick808, "dark", {"tmix": 0.5, "song_tempo": 150.0}),
-    ("Uptown Story", r_ep, None, {}),
-    ("Vinyl Dust", r_lofi, None, {"song_tempo": 84.0}),
-    ("Heartbroken 808", r_kick808, None, {"song_tempo": 75.0}),
-    ("Talkbox Romeo", r_lead_vox, None, {}),
-    ("808 Militia", r_kick808, None, {"song_tempo": 145.0}),
-    ("Cadillac Dreams", r_lead_saw, None, {"song_tempo": 88.0}),
-    ("Slow Lean", r_lofi, None, {"song_tempo": 70.0}),
-    ("808 Wizard", r_kick808, "wide", {"tmix": 0.5, "song_tempo": 140.0}),
-    ("Horror Flick", r_pad, "dark", {"tmix": 0.5, "song_tempo": 90.0}),
-    ("808 Sermon", r_kick808, None, {"song_tempo": 135.0}),
-    ("Funky Relative", r_clav, None, {"song_tempo": 95.0}),
-    ("808 Operator", r_kick808, None, {"song_tempo": 148.0}),
-    ("Cloud Walker", r_pad_air, None, {"song_tempo": 85.0}),
-    ("808 Oracle", r_kick808, "octave_down", {"tmix": 0.5, "song_tempo": 130.0}),
-    ("Hyphy Movement", r_gritty, None, {"song_tempo": 100.0}),
-    ("808 Omen", r_kick808, None, {"song_tempo": 142.0}),
-    ("Lofi Study", r_lofi, None, {"song_tempo": 80.0}),
-    ("808 Outlaw", r_kick808, None, {"song_tempo": 138.0}),
-    ("Southern Smoke", r_sub, None, {"song_tempo": 90.0}),
-    ("808 Voyage", r_kick808, "wide", {"tmix": 0.5, "song_tempo": 140.0}),
-    ("Block Party", r_ep, None, {"song_tempo": 95.0}),
-    # KEYS (24)
-    ("Velvet EP", r_ep, None, {}),
-    ("Suitcase Keys", r_ep, "octave_up", {"tmix": 0.5}),
-    ("Dyno Day", r_ep, None, {}),
-    ("Gospel Keys", r_organ, "wide", {"tmix": 0.5}),
-    ("Tonewheel", r_organ, None, {"amp_drive": 0.0}),
-    ("Clav Funk", r_clav, None, {"song_tempo": 105.0}),
-    ("Harpsi Rock", r_pluck, None, {}),
-    ("Jewelry Box", r_bell, None, {}),
-    ("Plastic Piano", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Felt Piano", r_ep, None, {}),
-    ("Church Organ", r_organ, "octave_down", {"tmix": 0.5}),
-    ("Jazz Organ", r_organ, None, {"amp_drive": 0.2}),
-    ("Stage Piano", r_ep, "wide", {"tmix": 0.5}),
-    ("Funky Clav", r_clav, None, {"song_tempo": 100.0}),
-    ("Rotary Club", r_organ, None, {}),
-    ("Saloon Piano", r_ep, None, {}),
-    ("Seventy Three", r_ep, None, {}),
-    ("Gospel Organ", r_organ, "wide", {"tmix": 0.5}),
-    ("Shoulder Synth", r_lead_saw, None, {}),
-    ("Street Accordion", r_organ, None, {}),
-    ("Celestial Keys", r_bell, "wide", {"tmix": 0.5}),
-    ("Motor Vibe", r_bell, None, {}),
-    ("Wood Bars", r_pluck, None, {}),
-    ("Thumb Piano", r_bell, "octave_up", {"tmix": 0.5}),
-    # RETRO / SYNTHWAVE (28)
-    ("Neon Grid", r_house_bass, None, {"song_tempo": 110.0}),
-    ("Chrome Sunset", r_lead_saw, "wide", {"tmix": 0.5}),
-    ("VHS Dreams", r_pad_air, "wide", {"tmix": 0.5}),
-    ("Laser Highway", r_arp, None, {"song_tempo": 118.0}),
-    ("Midnight Overdrive", r_gritty, None, {"song_tempo": 112.0}),
-    ("Outrider", r_arp, None, {"song_tempo": 120.0}),
-    ("Palm Static", r_pad, None, {}),
-    ("Strip Mall Sunset", r_ep, None, {"song_tempo": 100.0}),
-    ("Grid Glider", r_seq, None, {"song_tempo": 115.0}),
-    ("Turbo Teen", r_lead_square, None, {}),
-    ("Cassette Ghost", r_pad, "dark", {"tmix": 0.5}),
-    ("Neon Palms", r_house_bass, None, {"song_tempo": 108.0}),
-    ("After Midnight", r_sub, None, {"song_tempo": 105.0}),
-    ("Chrome Heart", r_lead_sync, None, {}),
-    ("VHS Tracking", r_arp, None, {"song_tempo": 122.0}),
-    ("Mall Soft", r_pad, None, {}),
-    ("Sunset Chaser", r_lead_saw, None, {}),
-    ("Analog Rain", r_arp, None, {"song_tempo": 100.0}),
-    ("Night Caller", r_sub, None, {"song_tempo": 110.0}),
-    ("Roller Rink", r_ep, None, {"song_tempo": 112.0}),
-    ("Laser Tag", r_lead_sync, None, {}),
-    ("Instant Photo", r_pad, "wide", {"tmix": 0.5}),
-    ("Arcade Fever", r_arp, None, {"song_tempo": 128.0}),
-    ("Miami Nice", r_house_bass, None, {"song_tempo": 114.0}),
-    ("Neon Sign", r_lead_saw, None, {}),
-    ("Rewind", r_seq, None, {"song_tempo": 110.0}),
-    ("CRT Glow", r_pad, "dark", {"tmix": 0.5}),
-    ("Top Down", r_lead_saw, "octave_up", {"tmix": 0.5}),
-    # PADS & STRINGS (32)
-    ("Velvet Glacier", r_pad_glass, "wide", {"tmix": 0.5}),
-    ("Cathedral Air", r_pad, "octave_up", {"tmix": 0.5}),
-    ("Wool Blanket", r_pad_fifth, None, {}),
-    ("Glasshouse", r_pad_glass, "wide", {"tmix": 0.5}),
-    ("Polar Glow", r_pad_air, "octave_up", {"tmix": 0.5}),
-    ("Silk Dunes", r_pad_fifth, None, {}),
-    ("Heavy Fog", r_pad, "dark", {"tmix": 0.5}),
-    ("Sunbaked", r_pad, None, {}),
-    ("Ice Cathedral", r_pad_glass, "octave_up", {"tmix": 0.5}),
-    ("Velvet Rope", r_strings, "wide", {"tmix": 0.5}),
-    ("Tape Strings", r_strings, None, {}),
-    ("Chamber Ensemble", r_strings, "wide", {"tmix": 0.5}),
-    ("String Ensemble", r_strings, "octave_up", {"tmix": 0.5}),
-    ("Slow Attack", r_pad_pulse, None, {}),
-    ("Ninth Cloud", r_pad_air, "wide", {"tmix": 0.5}),
-    ("Deep Field", r_pad, "dark", {"tmix": 0.5}),
-    ("Shimmer Wall", r_pad_air, "octave_up", {"tmix": 0.5}),
-    ("Frostbite", r_pad_glass, "octave_up", {"tmix": 0.5}),
-    ("Warm Front", r_pad_fifth, None, {}),
-    ("Cold Front", r_pad, "dark", {"tmix": 0.5}),
-    ("Slow Evolution", r_pad, "wide", {"tmix": 0.5}),
-    ("Particle Drift", r_pad_glass, "octave_up", {"tmix": 0.5}),
-    ("Sacred Space", r_choir, "wide", {"tmix": 0.5}),
-    ("Wide Open", r_pad_pulse, "wide", {"tmix": 0.5}),
-    ("Dark Energy", r_pad, "dark", {"tmix": 0.5}),
-    ("Light Leak", r_pad_air, "octave_up", {"tmix": 0.5}),
-    ("Undertow", r_pad_fifth, "dark", {"tmix": 0.5}),
-    ("High Tide", r_pad_fifth, "wide", {"tmix": 0.5}),
-    ("Low Mist", r_pad, "dark", {"tmix": 0.5}),
-    ("Golden Hour", r_pad_pulse, None, {}),
-    ("Blue Hour", r_pad_glass, "dark", {"tmix": 0.5}),
-    ("Afterglow", r_pad_voxpad, "wide", {"tmix": 0.5}),
-    # LEADS (28)
-    ("Screamer", r_lead_saw, None, {}),
-    ("Velvet Knife", r_lead_square, None, {}),
-    ("Feedback Loop", r_lead_sync, None, {}),
-    ("Laser Fingers", r_lead_saw, "octave_up", {"tmix": 0.5}),
-    ("Tin Whistle", r_lead_square, "octave_up", {"tmix": 0.5}),
-    ("Perfect Fifth", r_lead_saw, None, {}),    ("Octave Leopard", r_lead_saw, "octave_up", {"tmix": 0.5}),
-    ("Glide Path", r_lead_saw, None, {}),
-    ("Showtime", r_lead_saw, "wide", {"tmix": 0.5}),
-    ("Shred Ready", r_lead_sync, None, {}),
-    ("Prima Donna", r_lead_square, None, {}),
-    ("Air Guitar", r_lead_saw, None, {}),
-    ("Electric Fiddle", r_lead_square, "octave_up", {"tmix": 0.5}),
-    ("Silver Flute", r_lead_vox, "octave_up", {"tmix": 0.5}),
-    ("Midnight Sax", r_lead_vox, None, {}),
-    ("Pocket Trumpet", r_lead_square, None, {}),
-    ("Blues Harp", r_lead_square, None, {}),
-    ("Highland Drone", r_lead_saw, "octave_down", {"tmix": 0.5}),
-    ("Electric Sitar", r_pluck, "octave_down", {"tmix": 0.5}),
-    ("Neon Koto", r_pluck, None, {}),
-    ("Ghost Hands", r_lead_vox, None, {}),
-    ("Mouth Tube", r_lead_vox, "wide", {"tmix": 0.5}),
-    ("Robot Voice", r_lead_vox, None, {}),
-    ("Bullhorn", r_lead_square, None, {}),
-    ("Stadium Horn", r_lead_saw, "wide", {"tmix": 0.5}),
-    ("Siren Song", r_sfx, None, {}),
-    ("Cop Siren", r_sfx, None, {}),
-    ("Opera Singer", r_lead_vox, "octave_up", {"tmix": 0.5}),
-    # BELLS & PLUCKS (20)
-    ("Glass Bell", r_bell, None, {}),
-    ("Temple Bell", r_bell, "octave_down", {"tmix": 0.5}),
-    ("Wind Chime", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Icicle", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Music Box Dancer", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Electric FM", r_bell, None, {}),
-    ("Vibra Tone", r_bell, None, {}),
-    ("Oil Barrel", r_bell, "octave_down", {"tmix": 0.5}),
-    ("Steel Tongue", r_bell, None, {}),
-    ("Mbira Nights", r_pluck, "octave_up", {"tmix": 0.5}),
-    ("Bottle Blower", r_bell, None, {}),
-    ("Wine Glass", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Church Chimes", r_bell, "wide", {"tmix": 0.5}),
-    ("Chicken Pluckin", r_pluck, None, {}),
-    ("Three Strings", r_pluck, "octave_down", {"tmix": 0.5}),
-    ("Backporch", r_pluck, None, {}),
-    ("Harp Gliss", r_pluck, "octave_up", {"tmix": 0.5}),
-    ("Pizz Party", r_pluck, None, {}),
-    ("Nylon Dreams", r_pluck, None, {}),
-    ("Double Course", r_pluck, "wide", {"tmix": 0.5}),
-    # BRASS & CHOIR (16)
-    ("Section Brass", r_brass, "wide", {"tmix": 0.5}),
-    ("Muted Horn", r_brass, None, {}),
-    ("Stadium Brass", r_brass, "octave_down", {"tmix": 0.5}),
-    ("Grand Fanfare", r_brass, "octave_up", {"tmix": 0.5}),
-    ("Slider", r_lead_saw, None, {}),
-    ("Hunting Horn", r_brass, None, {}),
-    ("Oompah", r_brass, "octave_down", {"tmix": 0.5}),
-    ("Doomsday Fall", r_brass, None, {}),
-    ("Choir Ahh", r_choir, None, {}),
-    ("Choir Ohh", r_choir, "dark", {"tmix": 0.5}),
-    ("Monks At Dawn", r_choir, "octave_down", {"tmix": 0.5}),
-    ("Youth Choir", r_choir, "octave_up", {"tmix": 0.5}),
-    ("Gospel Choir", r_choir, "wide", {"tmix": 0.5}),
-    ("Four Voices", r_choir, None, {}),
-    ("Throat Singer", r_lead_vox, "octave_down", {"tmix": 0.5}),
-    ("Mouth Drums", r_sfx, None, {}),
-    # SFX & HITS (20)
-    ("Impact Zone", r_hit, "octave_down", {"tmix": 0.5}),
-    ("Twelve Bar Riser", r_riser, None, {}),
-    ("Downlifter", r_sfx, None, {}),
-    ("Alarm Bells", r_sfx, None, {}),
-    ("Laser Battle", r_sfx, "octave_up", {"tmix": 0.5}),
-    ("Power Down", r_sfx, "octave_down", {"tmix": 0.5}),
-    ("Air Siren", r_sfx, None, {}),
-    ("Distant Blast", r_sfx, "dark", {"tmix": 0.5}),
-    ("Starter Pistol", r_hit, None, {}),
-    ("Stadium Roar", r_sfx, "wide", {"tmix": 0.5}),
-    ("Thunder Roll", r_sfx, "dark", {"tmix": 0.5}),
-    ("Desert Rain", r_sfx, None, {}),
-    ("Ocean Wave", r_sfx, "wide", {"tmix": 0.5}),
-    ("Jungle Night", r_sfx, None, {}),
-    ("City Traffic", r_sfx, None, {}),
-    ("Robot Choir", r_choir, "dark", {"tmix": 0.5}),
-    ("Alien Landing", r_sfx, "octave_up", {"tmix": 0.5}),
-    ("Time Machine", r_sfx, "wide", {"tmix": 0.5}),
-    ("Coin Shower", r_bell, "octave_up", {"tmix": 0.5}),
-    ("Stabbed Orchestra", r_hit, "wide", {"tmix": 0.5}),
-    # SEQUENCES (12)
-    ("Capital Circuit", r_seq, None, {"song_tempo": 120.0}),
-    ("Citrus Dream", r_seq, "wide", {"tmix": 0.5, "song_tempo": 110.0}),
-    ("Step Runner", r_seq, None, {"song_tempo": 128.0}),
-    ("Modular Jam", r_seq, None, {"song_tempo": 115.0}),
-    ("Clockwork", r_seq, None, {"song_tempo": 132.0}),
-    ("Generative Etude", r_seq, "wide", {"tmix": 0.5, "song_tempo": 100.0}),
-    ("Euclids Groove", r_seq, None, {"song_tempo": 124.0}),
-    ("Ratchet Set", r_seq, None, {"song_tempo": 140.0}),
-    ("Silver Box", r_acid, None, {"song_tempo": 130.0}),
-    ("Bassline Generator", r_seq, "octave_down", {"tmix": 0.5, "song_tempo": 126.0}),
-    ("Arp Study Five", r_arp, None, {"song_tempo": 120.0}),
-    ("Endless Stairs", r_seq, "octave_up", {"tmix": 0.5, "song_tempo": 118.0}),
-]
-
-# r_riser takes an up/down flag via variant: even=up, odd=down
-_orig_riser = r_riser
-
-
-def _riser_wrap(rng, v):
-    return _orig_riser(rng, v if v % 2 == 0 else v)
-
-
-r_riser = _riser_wrap
-r_riser.__name__ = "r_riser"
-
-# Groups are contiguous index ranges (see PresetMap.md bank layout).
-GROUPS = [
-    (0, 4, "Init"), (5, 36, "Trance"), (37, 72, "Techno & House"),
-    (73, 96, "Bass House"), (97, 128, "Dubstep"), (129, 160, "DnB & Jungle"),
-    (161, 188, "Electronica"), (189, 220, "HipHop & Trap"), (221, 244, "Keys"),
-    (245, 272, "Retro & Synthwave"), (273, 304, "Pads & Strings"),
-    (305, 332, "Leads"), (333, 352, "Bells & Plucks"),
-    (353, 368, "Brass & Choir"), (369, 388, "SFX & Hits"),
-    (389, 400, "Sequences"),
-]
-
-RECIPE_TAGS = {
-    "r_init": ("Init", []), "r_init_lead": ("Lead", ["Init"]), "r_sub": ("Bass", ["Sub"]),
-    "r_acid": ("Bass", ["Acid"]), "r_reese": ("Bass", ["Reese"]),
-    "r_wobble": ("Bass", ["Wobble"]), "r_growl": ("Bass", ["Growl"]),
-    "r_gritty": ("Bass", ["Gritty"]), "r_house_bass": ("Bass", []),
-    "r_kick808": ("Bass", ["808", "Sub"]), "r_lead_saw": ("Lead", ["Saw"]),
-    "r_lead_sync": ("Lead", ["Sync"]), "r_lead_square": ("Lead", ["Square"]),
-    "r_lead_vox": ("Lead", ["Vocal"]), "r_lead_saw": ("Lead", ["Glide"]),
-    "r_pad": ("Pad", []), "r_pad_air": ("Pad", ["Airy"]),
-    "r_pad_glass": ("Pad", ["Glass"]), "r_pad_pulse": ("Pad", ["Pulse"]),
-    "r_pad_fifth": ("Pad", ["Fifth"]), "r_pad_voxpad": ("Pad", ["Vocal"]), "r_strings": ("Pad", ["Strings"]),
-    "r_arp": ("Arp", []), "r_seq": ("Sequence", []),
-    "r_ep": ("Keys", ["EP"]), "r_organ": ("Keys", ["Organ"]),
-    "r_clav": ("Keys", ["Clav"]), "r_bell": ("Bell", []),
-    "r_pluck": ("Bell", ["Pluck"]), "r_stab": ("Hit", ["Stab"]),
-    "r_hit": ("Hit", []), "r_brass": ("Brass", []),
-    "r_choir": ("Choir", []), "r_sfx": ("SFX", []),
-    "r_riser": ("SFX", ["Riser"]), "r_lofi": ("Keys", ["LoFi"]),
-}
-
-
-def tags_for(recipe_fn, t1, shared):
-    # Category + character + state flags only — no collection/genre tags.
-    cat, extra = RECIPE_TAGS[recipe_fn.__name__]
-    tags = [cat] + list(extra)
-    if shared.get("arp_on"):
-        tags.append("Arp")
-    if t1.get("amp_dist"):
-        tags.append("Distorted")
-    tags.append("Layer" if shared.get("tmix", 0.0) >= 0.5 else "Single")
-    # de-dupe, preserve order
-    seen, out = set(), []
-    for t in tags:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-# ------------------------------------------------------------------ assembly
-assert len(PATCHES) == 401, f"{len(PATCHES)} patches, expected 401"
-names = [p[0] for p in PATCHES]
-assert len(set(names)) == 401, "duplicate preset names"
-for n in names:
-    assert n and len(n) <= 32, f"bad name: {n!r}"
-    assert re.match(r"^[A-Za-z0-9 .'\-]+$", n), f"bad chars: {n!r}"
-
-
-# ------------------------------------------------------------------ diversity
-# Every preset must sound like its own patch, not a re-roll of a neighbour.
-# Each candidate = recipe (fresh randomness) + a few category-aware,
-# musically bounded VARIATION MOVES; it is accepted only if it is far from
-# every preset accepted before it (distance below). Moves never touch what
-# defines a recipe (PROTECT), and the no-drift invariants still hold.
-
-MOVABLE_T = ["osc1_shape", "osc1_pwm", "osc1_xmod", "osc1_digital", "osc1_wave",
-             "osc2_wave", "osc2_octave", "osc2_pitch", "osc2_fine", "osc2_level",
-             "osc2_shape", "osc2_pwm", "osc2_xmod", "osc2_digital", "mix_o2",
-             "mix_noise", "fm_amt", "osc_mod", "filter_type", "filter_cutoff",
-             "filter_reso", "filter_keytrack", "filter_envamt", "amp_velocity",
-             "amp_dist", "amp_drive", "env1_a", "env1_d", "env1_s", "env1_r",
-             "env2_a", "env2_d", "env2_s", "env2_r", "lfo2_wave", "lfo2_rate",
-             "lfo2_depth", "lfo2_sync", "mod3_src", "mod3_dst", "mod3_amt",
-             "mod4_src", "mod4_dst", "mod4_amt"]
-
-# Recipe identity: keys a variation move may never change.
-_PITCH_ID = ["osc1_wave", "osc1_octave", "osc1_pitch"]
-PROTECT = {
-    "r_init": "*", "r_init_lead": "*",
-    "r_sub": _PITCH_ID + ["osc_mod", "fm_amt"],
-    "r_kick808": _PITCH_ID + ["env2_a", "env2_s", "osc_mod"],
-    "r_acid": ["osc1_wave", "osc1_octave"],
-    "r_reese": ["osc1_wave", "osc2_wave", "osc2_fine", "osc2_octave", "osc2_pitch", "osc_mod"],
-    "r_wobble": ["lfo1_wave", "lfo1_sync", "lfo1_depth", "mod1_src", "mod1_dst", "mod1_amt"],
-    "r_growl": ["osc1_wave", "lfo1_wave", "lfo1_rate", "lfo1_depth",
-                "mod1_src", "mod1_dst", "mod1_amt", "mod2_src", "mod2_dst", "mod2_amt"],
-    "r_lead_sync": ["osc_mod", "osc1_wave"],
-    "r_lead_square": ["osc1_wave"],
-    "r_lead_saw": ["osc1_wave"],
-    "r_lead_vox": ["osc1_wave", "mod1_src", "mod1_dst", "mod1_amt"],
-    "r_pad_fifth": ["osc2_pitch", "osc2_octave"],
-    "r_pad_pulse": ["osc1_wave", "osc2_wave", "osc2_pitch", "osc2_octave"],
-    "r_pad_air": ["filter_type", "lfo2_depth", "mod3_amt", "mod4_amt"],  # no LFO motion
-    "r_pad_voxpad": ["osc1_wave", "lfo2_depth", "mod3_amt", "mod4_amt"],  # fixed vowel
-    "r_pad_glass": ["osc1_wave"],
-    "r_choir": ["osc1_wave"],
-    "r_riser": ["filter_cutoff", "filter_envamt", "env1_a", "env1_s", "env2_a",
-                "filter_type", "osc_mod"],
-    "r_organ": ["osc1_wave", "env2_s"],
-}
-
-# Category envelopes of taste: (lo, hi) bounds moves draw from.
-CAT = {
-    "Bass":  dict(cut=(0.18, 0.62), reso=(0.0, 0.7), envamt=(0.15, 0.75), drive=(0.1, 0.7),
-                  noise=(0.0, 0.12), o2int=[(0, 0), (0, 0), (1, 0), (0, 7), (1, 7)],
-                  o2w=[W_SAW, W_SQR, W_TRI, W_SIN, W_DIG], fx=0.15, dly=0.12, lfo=0.45,
-                  ftypes=[F_LP24, F_LP24, F_LP12]),
-    "Lead":  dict(cut=(0.45, 0.95), reso=(0.05, 0.45), envamt=(0.1, 0.6), drive=(0.0, 0.55),
-                  noise=(0.0, 0.1), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7), (0, 5), (1, 7)],
-                  o2w=[W_SAW, W_SQR, W_TRI, W_DIG], fx=0.6, dly=0.7, lfo=0.6,
-                  ftypes=[F_LP24, F_LP12, F_LP12]),
-    "Pad":   dict(cut=(0.3, 0.8), reso=(0.0, 0.35), envamt=(0.05, 0.5), drive=(0.0, 0.25),
-                  noise=(0.0, 0.18), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7), (0, 5), (1, 7)],
-                  o2w=[W_SAW, W_SQR, W_TRI, W_SIN, W_DIG], fx=0.85, dly=0.8, lfo=0.75,
-                  ftypes=[F_LP24, F_LP12, F_LP12, F_BP12]),
-    "Arp":   dict(cut=(0.4, 0.9), reso=(0.05, 0.55), envamt=(0.15, 0.7), drive=(0.0, 0.45),
-                  noise=(0.0, 0.08), o2int=[(0, 0), (1, 0), (0, 7), (1, 7), (0, 5)],
-                  o2w=[W_SAW, W_SQR, W_TRI, W_DIG], fx=0.5, dly=0.85, lfo=0.5,
-                  ftypes=[F_LP24, F_LP12, F_BP12]),
-    "Keys":  dict(cut=(0.45, 0.9), reso=(0.0, 0.25), envamt=(0.0, 0.5), drive=(0.0, 0.45),
-                  noise=(0.0, 0.08), o2int=[(1, 0), (2, 0), (0, 0), (1, 7)],
-                  o2w=[W_SIN, W_TRI, W_SQR, W_DIG], fx=0.6, dly=0.4, lfo=0.55,
-                  ftypes=[F_LP24, F_LP12]),
-    "Bell":  dict(cut=(0.55, 0.95), reso=(0.0, 0.3), envamt=(0.1, 0.65), drive=(0.0, 0.3),
-                  noise=(0.0, 0.08), o2int=[(1, 0), (2, 0), (-1, 0), (1, 7), (0, 7)],
-                  o2w=[W_SIN, W_TRI, W_DIG, W_SQR], fx=0.45, dly=0.85, lfo=0.45,
-                  ftypes=[F_LP24, F_LP12, F_BP12]),
-    "Brass": dict(cut=(0.4, 0.8), reso=(0.0, 0.3), envamt=(0.25, 0.7), drive=(0.0, 0.4),
-                  noise=(0.0, 0.1), o2int=[(0, 0), (-1, 0), (1, 0), (0, 7)],
-                  o2w=[W_SAW, W_SQR, W_DIG], fx=0.55, dly=0.4, lfo=0.5,
-                  ftypes=[F_LP24, F_LP12]),
-    "Choir": dict(cut=(0.45, 0.85), reso=(0.0, 0.3), envamt=(0.0, 0.35), drive=(0.0, 0.2),
-                  noise=(0.0, 0.2), o2int=[(0, 0), (1, 0), (-1, 0), (0, 7)],
-                  o2w=[W_SIN, W_TRI, W_SAW, W_DIG], fx=0.8, dly=0.75, lfo=0.5,
-                  ftypes=[F_LP24, F_LP12, F_BP12]),
-    "Hit":   dict(cut=(0.4, 0.85), reso=(0.05, 0.5), envamt=(0.3, 0.8), drive=(0.15, 0.7),
-                  noise=(0.05, 0.4), o2int=[(0, 0), (0, 7), (1, 0), (0, 5), (-1, 0)],
-                  o2w=[W_SAW, W_SQR, W_DIG], fx=0.4, dly=0.5, lfo=0.3,
-                  ftypes=[F_LP24, F_LP12, F_BP12]),
-    "SFX":   dict(cut=(0.2, 0.95), reso=(0.1, 0.8), envamt=(-0.6, 0.8), drive=(0.0, 0.8),
-                  noise=(0.0, 0.9), o2int=[(0, 0), (1, 0), (0, 7), (2, 0), (-1, 0), (0, 5)],
-                  o2w=[W_SAW, W_SQR, W_DIG, W_NOI, W_SIN], fx=0.6, dly=0.6, lfo=0.8,
-                  ftypes=[F_LP24, F_LP12, F_BP12, F_HP12]),
-}
-CAT["Sequence"] = CAT["Arp"]
-CAT["Init"] = CAT["Lead"]
-
-
-def _protected(recipe_name):
-    return PROTECT.get(recipe_name, [])
-
-
-def _free_mod_slot(full):
-    for m in (4, 3):  # recipes use mod1/mod2
-        if full.get(f"mod{m}_amt", 0.0) == 0.0:
-            return m
-    return None
-
-
-def _set(full, key, val, prot, cat_bass=False):
-    if prot == "*" or key in prot:
-        return False
-    full[key] = val
-    return True
-
-
-def _clamp01(x):
-    return max(0.0, min(1.0, x))
-
-
-def m_osc2(full, rng, c, prot, cat):
-    o1o = full.get("osc1_octave", 0)
-    octv, pitch = rng.choice(c["o2int"])
-    if cat == "Bass":
-        octv = min(0, o1o + octv) - o1o  # bass layers never climb above the 8' octave
-    w = rng.choice(c["o2w"])
-    ok = _set(full, "osc2_wave", w, prot)
-    if ok:
-        _set(full, "osc2_octave", max(-2, min(2, o1o + octv)), prot)
-        _set(full, "osc2_pitch", pitch, prot)
-        _set(full, "osc2_fine", rng.uniform(-9, 9), prot)
-        lv = rng.uniform(0.3, 0.85)
-        _set(full, "osc2_level", lv, prot); _set(full, "mix_o2", lv, prot)
-        if w == W_DIG:
-            _set(full, "osc2_digital", rng.choice(DIG[rng.randrange(8)]), prot)
-        _set(full, "osc2_shape", rng.uniform(0.0, 0.5), prot)
-        _set(full, "osc2_pwm", rng.uniform(0.2, 0.6), prot)
-
-
-def m_osc1_timbre(full, rng, c, prot, cat):
-    _set(full, "osc1_shape", rng.uniform(0.0, 0.6 if cat == "Bass" else 0.8), prot)
-    _set(full, "osc1_pwm", rng.uniform(0.15, 0.6), prot)
-    _set(full, "osc1_xmod", rng.uniform(0.0, 0.6), prot)
-    if full.get("osc1_wave") == W_DIG:
-        fam = full.get("osc1_digital", 0) % 8
-        if cat in ("SFX", "Arp", "Sequence", "Hit") and rng.random() < 0.5:
-            fam = rng.randrange(8)
-        _set(full, "osc1_digital", rng.choice(DIG[fam]), prot)
-
-
-def m_osc1_wave(full, rng, c, prot, cat):
-    # whole-character swap among the category's oscillator palette
-    if cat == "Keys":  # keyboards stay mellow: sine/tri tines, wood/reed/analog ROM
-        w = rng.choice([W_SIN, W_TRI, W_DIG, W_DIG])
-        fams = [6, 1, 0, 6]
-    else:
-        w = rng.choice(c["o2w"])
-        fams = list(range(8))
-    if w == W_NOI and cat != "SFX":
-        return
-    if _set(full, "osc1_wave", w, prot) and w == W_DIG:
-        _set(full, "osc1_digital", rng.choice(DIG[rng.choice(fams)]), prot)
-
-
-def m_filter(full, rng, c, prot, cat):
-    _set(full, "filter_type", rng.choice(c["ftypes"]), prot)
-    _set(full, "filter_cutoff", rng.uniform(*c["cut"]), prot)
-    _set(full, "filter_reso", rng.uniform(*c["reso"]), prot)
-    _set(full, "filter_keytrack", rng.choice([0.0, 0.25, 0.5, 0.75]), prot)
-    _set(full, "filter_envamt", rng.uniform(*c["envamt"]), prot)
-    if full.get("filter_type") == F_HP12:  # keep highpasses speaking
-        full["filter_cutoff"] = min(full["filter_cutoff"], 0.45)
-    if full.get("filter_type") == F_BP12:
-        # bandpass must sit in a mid band (~300 Hz-1.5 kHz) INCLUDING the
-        # envelope push: a band at 8+ kHz is thin and near-silent
-        full["filter_cutoff"] = min(max(full["filter_cutoff"], 0.35), 0.58)
-        full["filter_envamt"] = max(-0.25, min(full["filter_envamt"],
-                                               0.62 - full["filter_cutoff"]))
-
-
-def m_env(full, rng, c, prot, cat):
-    if cat in ("Bass", "Hit", "Arp", "Sequence"):
-        a = (0.0, 0.03); d = (0.06, 0.45); sus = (0.0, 0.8); r = (0.04, 0.3)
-    elif cat in ("Keys", "Bell"):
-        a = (0.0, 0.03); d = (0.25, 0.7); sus = (0.0, 0.5); r = (0.15, 0.55)
-    elif cat in ("Pad", "Choir"):
-        a = (0.1, 0.5); d = (0.2, 0.6); sus = (0.6, 1.0); r = (0.3, 0.7)
-    elif cat == "Brass":
-        a = (0.02, 0.15); d = (0.1, 0.4); sus = (0.6, 0.95); r = (0.08, 0.3)
-    elif cat == "SFX":
-        a = (0.0, 0.6); d = (0.1, 0.7); sus = (0.0, 1.0); r = (0.1, 0.7)
-    else:  # Lead
-        a = (0.0, 0.08); d = (0.1, 0.5); sus = (0.5, 1.0); r = (0.06, 0.4)
-    for e in ("env1", "env2"):
-        if e == "env2" and rng.random() < 0.35:
-            continue  # sometimes only the filter contour changes
-        _set(full, f"{e}_a", rng.uniform(*a), prot)
-        _set(full, f"{e}_d", rng.uniform(*d), prot)
-        _set(full, f"{e}_s", rng.uniform(*sus), prot)
-        _set(full, f"{e}_r", rng.uniform(*r), prot)
-
-
-def m_motion(full, rng, c, prot, cat):
-    """LFO2 or velocity onto a non-pitch destination via a free mod slot."""
-    m = _free_mod_slot(full)
-    if m is None:
-        return
-    if rng.random() < 0.3:  # expression instead of an LFO
-        src, dst = 4, rng.choice([4, 4, 6, 2])
-        amt = rng.uniform(0.15, 0.4)
-    else:
-        if not (_set(full, "lfo2_depth", rng.uniform(0.25, 0.8), prot)):
-            return
-        _set(full, "lfo2_wave", rng.choice([L_SIN, L_TRI, L_SQR, L_SAW, L_RND]), prot)
-        if cat in ("Bass", "Arp", "Sequence") or rng.random() < 0.35:
-            _set(full, "lfo2_sync", rng.choice([SYNC_DIV["1/4"], SYNC_DIV["1/8"],
-                                                SYNC_DIV["1/16"], SYNC_DIV["1/2"]]), prot)
-        else:
-            _set(full, "lfo2_sync", 0, prot)
-            _set(full, "lfo2_rate", rng.uniform(0.15, 0.65), prot)
-        src = 3
-        dst = rng.choice([4, 4, 2, 7, 6, 5] if cat != "Bass" else [4, 4, 2, 6])
-        amt = rng.uniform(0.15, 0.5) * rng.choice([1, -1])
-    if _set(full, f"mod{m}_amt", amt, prot):
-        full[f"mod{m}_src"] = src
-        full[f"mod{m}_dst"] = dst  # never 0/1 (pitch): invariant holds
-
-
-def m_drive(full, rng, c, prot, cat):
-    lo, hi = c["drive"]
-    d = rng.uniform(lo, hi)
-    if _set(full, "amp_drive", d, prot):
-        _set(full, "amp_dist", 1 if d > 0.2 else 0, prot)
-
-
-def m_noise(full, rng, c, prot, cat):
-    _set(full, "mix_noise", rng.uniform(*c["noise"]), prot)
-
-
-def m_fm_ring(full, rng, c, prot, cat):
-    r = rng.random()
-    if cat in ("Keys", "Bell", "SFX", "Bass", "Arp", "Sequence", "Hit") and r < 0.6:
-        _set(full, "fm_amt", rng.uniform(0.05, 0.45 if cat != "Bass" else 0.25), prot)
-    elif cat in ("Bell", "SFX", "Lead", "Arp", "Hit") and r < 0.8:
-        _set(full, "osc_mod", rng.choice([1, 2] if cat != "Bell" else [1]), prot)
-    else:
-        _set(full, "fm_amt", 0.0, prot)
-
-
-def m_expr(full, rng, c, prot, cat):
-    _set(full, "amp_velocity", rng.uniform(0.0, 0.7), prot)
-
-
-def m_space(sh, rng, c, cat):
-    """shared FX: may add, change or remove modulation FX / delay"""
-    if rng.random() < c["fx"]:
-        sh["modfx_type"] = rng.randint(1, 3)
-        sh["modfx_rate"] = rng.uniform(0.08, 0.45)
-        sh["modfx_depth"] = rng.uniform(0.15, 0.6)
-        sh["modfx_mix"] = rng.uniform(0.12, 0.45)
-    else:
-        sh["modfx_type"], sh["modfx_mix"] = 0, 0.0
-    if rng.random() < c["dly"]:
-        sh["delay_type"] = rng.randint(0, 2)
-        sh["delay_time"] = rng.uniform(0.2, 0.6)
-        sh["delay_feedback"] = rng.uniform(0.15, 0.55)
-        sh["delay_mix"] = rng.uniform(0.08, 0.35)
-    else:
-        sh["delay_mix"] = 0.0
-    sh["eq_low"] = round(rng.uniform(-4, 4) * 2) / 2
-    sh["eq_high"] = round(rng.uniform(-4, 4) * 2) / 2
-
-
-def m_arp(sh, rng, cat):
-    if not sh.get("arp_on"):
-        return
-    sh["arp_mode"] = rng.randint(0, 4)
-    sh["arp_rate"] = rng.choice([ARP_RATE["1/16"], ARP_RATE["1/8"], ARP_RATE["1/8T"],
-                                 ARP_RATE["1/16T"], ARP_RATE["1/16"]])
-    sh["arp_octaves"] = rng.choice([1, 1, 2, 2, 3])
-    sh["arp_gate"] = rng.uniform(0.25, 0.9)
-    sh["arp_swing"] = rng.choice([0.0, 0.0, 0.2, 0.35])
-
-
-TIMBRE_MOVES = [(m_osc2, 3), (m_osc1_timbre, 3), (m_filter, 3), (m_env, 3),  # weights
-                (m_motion, 2), (m_drive, 2), (m_noise, 1), (m_fm_ring, 2),
-                (m_expr, 1), (m_osc1_wave, 1)]
-
-# t2 mirrors t1 edits, except what the layer style deliberately offsets
-LAYER_OWN = {"osc1_octave", "osc2_octave", "amp_pan", "osc1_fine", "voice_detune"}
-
-
-def vary(full, rng, recipe_name, cat, n_moves):
-    prot = _protected(recipe_name)
-    if prot == "*" or cat not in CAT:
-        return
-    c = CAT[cat]
-    before = {k: full[k] for k in MOVABLE_T if k in full}
-    cut_before = full.get("filter_cutoff", 1.0)
-    moves = [m for m, w in TIMBRE_MOVES for _ in range(w)]
-    picked = set()
-    for _ in range(n_moves):
-        mv = rng.choice(moves)
-        if mv in picked:
-            continue
-        picked.add(mv)
-        mv(full, rng, c, prot, cat)
-    for k in MOVABLE_T:
-        if k in full and full[k] != before.get(k) and k not in LAYER_OWN:
-            if k == "filter_cutoff":  # layers keep their cutoff offset
-                full["t2_" + k] = _clamp01(full.get("t2_" + k, cut_before) + full[k] - cut_before)
-            else:
-                full["t2_" + k] = full[k]
-    if rng.random() < 0.75:
-        m_space(full, rng, c, cat)
-    m_arp(full, rng, cat)
-
-
-# ---- perceptual-ish distance between finished presets ----
-STRUCT_W = {"osc1_wave": 1.0, "osc2_wave": 1.0, "filter_type": 1.0, "osc_mod": 1.0,
-            "osc1_digital": 0.6, "osc2_digital": 0.4, "modfx_type": 0.6, "delay_type": 0.3,
-            "arp_mode": 0.7, "arp_rate": 0.7, "lfo1_wave": 0.5, "lfo2_wave": 0.5,
-            "lfo1_sync": 0.4, "lfo2_sync": 0.4, "amp_dist": 0.6, "arp_on": 1.0,
-            "voice_poly": 0.3, "osc1_octave": 1.0, "osc2_octave": 0.7, "osc1_pitch": 0.8,
-            "osc2_pitch": 0.7}
-for _i in (1, 2, 3, 4):
-    STRUCT_W[f"mod{_i}_src"] = 0.6
-    STRUCT_W[f"mod{_i}_dst"] = 0.6
-
-
-def effective(v):
-    eff = set()
-    pres = ["", "t2_"] if v["tmix"] > 0.0 else [""]
-    for pre in pres:
-        g_ = lambda k: v[pre + k]
-        add = lambda *ks: eff.update(pre + k for k in ks)
-        if g_("osc1_level") * g_("mix_o1") > 0:
-            add("osc1_wave", "osc1_octave", "osc1_pitch", "osc1_fine", "osc1_level",
-                "mix_o1", "osc1_shape", "osc1_pwm", "osc1_xmod")
-            if g_("osc1_wave") in (4, 6): add("osc1_digital")
-        if g_("osc2_level") * g_("mix_o2") > 0 or g_("fm_amt") > 0 or g_("osc_mod") in (1, 3):
-            add("osc2_wave", "osc2_octave", "osc2_pitch", "osc2_fine", "osc2_level",
-                "mix_o2", "osc2_shape", "osc2_pwm", "osc2_xmod", "osc_mod", "fm_amt")
-            if g_("osc2_wave") in (4, 6): add("osc2_digital")
-        if g_("mix_noise") > 0: add("mix_noise")
-        add("filter_type", "filter_cutoff", "filter_reso", "filter_keytrack", "filter_envamt",
-            "amp_level", "amp_pan", "amp_velocity", "amp_dist",
-            "env2_a", "env2_d", "env2_s", "env2_r", "voice_poly", "voice_detune")
-        if g_("amp_dist") > 0.5: add("amp_drive")
-        if g_("filter_envamt") != 0: add("env1_a", "env1_d", "env1_s", "env1_r")
-        lfo_used = {1: False, 2: False}
-        for m in (1, 2, 3, 4):
-            if g_(f"mod{m}_amt") != 0:
-                add(f"mod{m}_src", f"mod{m}_dst", f"mod{m}_amt")
-                sidx = int(g_(f"mod{m}_src"))
-                if sidx in (2, 3): lfo_used[sidx - 1] = True
-                if sidx == 0: add("env1_a", "env1_d", "env1_s", "env1_r")
-        if g_("voice_vib") > 0: lfo_used[2] = True; add("voice_vib")
-        for l in (1, 2):
-            if lfo_used[l] and g_(f"lfo{l}_depth") > 0:
-                add(f"lfo{l}_wave", f"lfo{l}_depth", f"lfo{l}_sync")
-                if g_(f"lfo{l}_sync") == 0: add(f"lfo{l}_rate")
-                else: eff.add("song_tempo")
-    if v["modfx_type"] != 0 and v["modfx_mix"] > 0:
-        eff.update(["modfx_type", "modfx_rate", "modfx_depth", "modfx_mix"])
-    if v["delay_mix"] > 0:
-        eff.update(["delay_type", "delay_time", "delay_feedback", "delay_mix"])
-    if v["arp_on"] > 0.5:
-        eff.update(["arp_on", "arp_mode", "arp_rate", "arp_gate", "arp_octaves",
-                    "arp_swing", "song_tempo"])
-    eff.update(["eq_low", "eq_high", "tmix"])
-    return eff
-
-
-def _base(k):
-    return k[3:] if k.startswith("t2_") else k
-
-
-def _is_struct(k):
-    b = _base(k)
-    return k in NCHOICE or b in STRUCT_W or b in ("amp_dist", "arp_on", "limiter", "voice_poly")
-
-
-def _n(k, x):
-    if k in NCHOICE:
-        return x
-    lo, hi, _d = RANGE[k]
-    return (x - lo) / (hi - lo) if hi > lo else 0.0
-
-
-def signature(v, eff):
-    return (frozenset(eff), tuple(sorted((k, v[k]) for k in eff if _is_struct(k))))
-
-
-def distance(a, b):
-    """(D, same_skeleton, max_knob): D = weighted structural mismatches
-    + summed normalised knob differences over the params either one uses."""
-    va, ea, sa = a
-    vb, eb, sb = b
-    d, mx = 0.0, 0.0
-    for k in ea ^ eb:  # module on in one, off in the other
-        d += 0.5
-    for k in ea & eb:
-        if _is_struct(k):
-            if va[k] != vb[k]:
-                d += STRUCT_W.get(_base(k), 0.5)
-        else:
-            diff = abs(_n(k, va[k]) - _n(k, vb[k]))
-            d += diff
-            mx = max(mx, diff)
-    return d, sa == sb, mx
-
-
-MIN_D = 2.0      # total perceptual distance to every earlier preset
-MIN_KNOB = 0.35  # same skeleton? then at least one knob must move this far
-
-
-def build_candidate(idx, rng, n_moves):
-    name, recipe, layer, fixed = PATCHES[idx]
-    cat = RECIPE_TAGS[recipe.__name__][0]
-    t1, t2ov, sh = recipe(rng, idx)
-    full = {}
-    apply("", full, t1)
-    if layer:
-        t2 = derive_t2(t1, rng, layer)
-        apply("t2_", full, t2)
-        full["tmix"] = 0.5
-    else:
-        t2 = derive_t2(t1, rng, "copy")
-        apply("t2_", full, t2)
-        full["tmix"] = 0.0
-    for k, v in t2ov.items():
-        full["t2_" + k] = v
-    shared = base_shared(rng)
-    shared.update(sh)
-    full.update(shared)
-    for k, val in base_timbre().items():  # complete both timbres for the moves
-        full.setdefault(k, val)
-        full.setdefault("t2_" + k, val)
-    if n_moves > 0:
-        vary(full, rng, recipe.__name__, cat, n_moves)
-    full.update(fixed)  # per-patch fixes (tempo, tmix) always win
-    # measured loudness trim (Tools/level_bank.py): even, slightly lower levels
-    full["output_level"] = LEVELS.get(idx, 1.0)
-    return finalize(name, recipe, full)
-
-
-# ---- IN-KEY GUARANTEE: every oscillator stays within CENT_LIMIT of the
-# played key (or a fourth/fifth/octave of it). Sources of detune in the
-# engine: osc fine, the Detune knob (osc1 -15c*d, osc2 +15c*d), mono unison
-# taps (+-25c*d), triangle Shape (retunes up to +19 st, and LFO1 reaches it
-# through PWM), vibrato, FM/ring sidebands of non-octave osc2 ratios.
-CENT_LIMIT = 24.0
-
-_LEVELS_FILE = ROOT / "Tools" / "bank_levels.json"
-LEVELS = {int(k): float(v) for k, v in __import__("json").loads(_LEVELS_FILE.read_text()).items()} \
-    if _LEVELS_FILE.exists() else {}
-KEY_INTERVALS = (0, 5, 7, 12, -5, -7, -12)
-
-
-def pitch_safe(full):
-    full["master_tune"] = 0.0
-    for pre in ("", "t2_"):
-        g = lambda k: full[pre + k]
-        full[pre + "osc1_pitch"] = 0  # osc1 defines the key
-        if g("osc2_pitch") not in KEY_INTERVALS:
-            full[pre + "osc2_pitch"] = 7 if g("osc2_pitch") > 0 else -5
-        if g("osc_mod") in (1, 3) or g("fm_amt") > 0:
-            # ring/FM sidebands are only in key for octave ratios
-            if g("osc2_pitch") not in (0, 12, -12):
-                full[pre + "osc2_pitch"] = 0
-        for o in ("osc1", "osc2"):
-            if g(o + "_wave") == W_TRI:
-                full[pre + o + "_shape"] = 0.0  # tri Shape = +19 st retune
-                full[pre + o + "_pwm"] = 0.0    # ...and LFO1 reaches it via PWM
-        if g("osc1_wave") == W_TRI:
-            for m in (1, 2, 3, 4):
-                if g(f"mod{m}_dst") == 2 and g(f"mod{m}_amt") != 0:
-                    full[pre + f"mod{m}_dst"] = 4  # shape mod -> cutoff instead
-        # detune budget per oscillator: |fine -/+ 15d| + unison 25d <= limit
-        d = full[pre + "voice_detune"]
-        unison = int(round(full[pre + "voice_poly"])) == 1 and d > 0.01
-        if unison:
-            d = min(d, 0.55)
-            full[pre + "voice_detune"] = d
-        room = CENT_LIMIT - (25.0 * d if unison else 0.0)
-        full[pre + "osc1_fine"] = max(15 * d - room, min(15 * d + room, g("osc1_fine")))
-        full[pre + "osc2_fine"] = max(-15 * d - room, min(-15 * d + room, g("osc2_fine")))
-        # vibrato (mod wheel) peak = 2% * vib * LFO2 depth: keep under ~24c
-        lim = 0.0139 / 0.02
-        if g("voice_vib") * max(g("lfo2_depth"), 1e-6) > lim:
-            full[pre + "voice_vib"] = lim / max(g("lfo2_depth"), 1e-6)
-
-
-def finalize(name, recipe, full):
-    pitch_safe(full)
-    # ---- NO-DRIFT INVARIANTS (bank-wide, machine-checked) ----
-    # 1. No modulation source may touch pitch with nonzero amount.
-    for i in (1, 2, 3, 4):
+def base_shared():
+    return {
+        "modfx_type": 0, "modfx_rate": 0.25, "modfx_depth": 0.25, "modfx_mix": 0.0,
+        "delay_type": 0, "delay_time": 0.35, "delay_feedback": 0.25, "delay_mix": 0.0,
+        "delay_sync": 0, "eq_low": 0.0, "eq_high": 0.0,
+        "drive_on": 0, "drive_amount": 0.3, "drive_mix": 0.5,
+        "sat_on": 0, "sat_amount": 0.3, "sat_tone": 0.6, "sat_mode": 0,
+        "reverb_on": 0, "reverb_size": 0.45, "reverb_damp": 0.5, "reverb_mix": 0.0,
+        "arp_on": 0, "arp_mode": 0, "arp_rate": ARP["1/16"], "arp_gate": 0.6,
+        "arp_octaves": 1, "arp_swing": 0.0, "arp_latch": 0,
+        "arp_last_step": 8, **{f"arp_step{k}": 1 for k in range(1, 9)},
+        "output_level": 1.0, "master_tune": 0.0, "song_tempo": 124.0, "bend_range": 2.0,
+        "tmix": 0.0, "limiter": 1,
+    }
+
+
+def base_voice(pre=""):
+    return {pre + "voice_poly": 8, pre + "voice_detune": 0.0, pre + "voice_portamento": 0.0,
+            pre + "voice_vib": 0.35, pre + "voice_assign": 0, pre + "voice_trigger": 1,
+            pre + "voice_priority": 0, pre + "voice_unidet": 15.0}
+
+
+# ------------------------------------------------------------------ patch
+class Patch:
+    """One preset: timbre 1, optional timbre 2 (layered by tmix), shared."""
+
+    def __init__(self):
+        self.t1 = base_timbre()
+        self.t2 = None
+        self.sh = base_shared()
+        self.sh.update(base_voice(""))
+        self.sh.update(base_voice("t2_"))
+
+    # --- voice
+    def mono(self, glide=0.0, legato=False, t2=True):
+        for pre in ("", "t2_") if t2 else ("",):
+            self.sh[pre + "voice_assign"] = 1
+            self.sh[pre + "voice_poly"] = 1
+            self.sh[pre + "voice_portamento"] = glide
+            self.sh[pre + "voice_trigger"] = 0 if legato else 1
+        return self
+
+    def unison(self, cents=20.0):
         for pre in ("", "t2_"):
-            if full.get(f"{pre}mod{i}_dst") in (0, 1):
-                assert full.get(f"{pre}mod{i}_amt", 0.0) == 0.0, \
-                    f"{name}: {pre}mod{i} targets pitch"
-    # 2. No portamento anywhere: glides are pitch drift by definition.
-    assert full.get("voice_portamento", 0.0) == 0.0, f"{name}: portamento"
-    assert full.get("t2_voice_portamento", 0.0) == 0.0, f"{name}: t2 portamento"
-    # 3. Chorus/flanger are delay-modulation: keep depth/rate in the musical zone.
-    if full.get("modfx_type") in (1, 2):
-        full["modfx_depth"] = min(full.get("modfx_depth", 0.0), 0.35)
-        full["modfx_rate"] = min(full.get("modfx_rate", 0.0), 0.35)
-    # VOICE ASSIGN: a single-voice recipe is the Mono voice (legato, last-note
-    # priority), everything else Poly
-    for pre in ("", "t2_"):
-        full[pre + "voice_assign"] = 1 if int(round(full[pre + "voice_poly"])) == 1 else 0
-    probe = {k: full[k] for k in base_timbre()}
-    tags = tags_for(recipe, probe, full)
-    vals, vmap = [], {}
-    for pid in KIDS:
-        assert pid in full, f"{name}: missing {pid}"
-        v = full[pid]
-        if pid in NCHOICE:
-            v = float(int(round(v)))
-            assert 0 <= v < NCHOICE[pid], f"{name}: {pid}={v}"
-        else:
-            lo, hi, _d = RANGE[pid]
-            v = float(min(hi, max(lo, v)))
-        vals.append(v)
-        vmap[pid] = v
-    eff = effective(vmap)
-    return name, vals, tags, (vmap, eff, signature(vmap, eff))
+            self.sh[pre + "voice_assign"] = 2
+            self.sh[pre + "voice_poly"] = 1
+            self.sh[pre + "voice_unidet"] = cents
+        return self
+
+    def spread(self, amount):
+        self.sh["voice_detune"] = amount
+        self.sh["t2_voice_detune"] = amount
+        return self
+
+    # --- timbre 2: a copy of timbre 1 that diverges, mixed in equal power
+    def layer(self, mix=0.5, **changes):
+        self.t2 = dict(self.t1)
+        self.t2.update(changes)
+        self.sh["tmix"] = mix
+        return self
+
+    def wide(self, cents=9.0, pan=0.35, mix=0.5):
+        """Stereo double: timbre 2 detuned the other way, panned opposite."""
+        self.layer(mix,
+                   osc1_fine=self.t1["osc1_fine"] - cents, osc2_fine=self.t1["osc2_fine"] - cents,
+                   amp_pan=pan)
+        self.t1["osc1_fine"] += cents * 0.5
+        self.t1["osc2_fine"] += cents * 0.5
+        self.t1["amp_pan"] = -pan
+        return self
+
+    # --- shaping
+    # times: attack in seconds; decay / release = seconds to fall ~20 dB
+    def amp(self, a=0.0, d=0.3, s=1.0, r=0.3, vel=None):
+        self.t1.update(env2_a=atk(a), env2_d=fall(d), env2_s=s, env2_r=fall(r))
+        if vel is not None:
+            self.t1["amp_velocity"] = vel
+        return self
+
+    def fenv(self, a=0.0, d=0.3, s=0.0, r=0.3, amt=0.0):
+        self.t1.update(env1_a=atk(a), env1_d=fall(d), env1_s=s, env1_r=fall(r), filter_envamt=amt)
+        return self
+
+    def filt(self, hz, reso=0.0, kind=F_LP24, key=0.5):
+        self.t1.update(filter_type=kind, filter_cutoff=cut(hz), filter_reso=reso, filter_keytrack=key)
+        return self
+
+    def mod(self, slot, src, dst, amt):
+        self.t1.update({f"mod{slot}_src": src, f"mod{slot}_dst": dst, f"mod{slot}_amt": amt})
+        return self
+
+    def lfo1(self, wave=L_SIN, hz=1.0, depth=1.0, sync=None, key=2):
+        self.t1.update(lfo1_wave=wave, lfo1_rate=lrate(hz), lfo1_depth=depth,
+                       lfo1_sync=DIV[sync] if sync else 0, lfo1_keysync=key)
+        return self
+
+    def lfo2(self, wave=L_SIN, hz=5.0, depth=1.0, sync=None, key=0):
+        self.t1.update(lfo2_wave=wave, lfo2_rate=lrate(hz), lfo2_depth=depth,
+                       lfo2_sync=DIV[sync] if sync else 0, lfo2_keysync=key)
+        return self
+
+    def o1(self, wave, octave=0, pitch=0, fine=0.0, shape=0.0, level=0.8, digital=0, pwm=0.0):
+        self.t1.update(osc1_wave=wave, osc1_octave=octave, osc1_pitch=pitch, osc1_fine=fine,
+                       osc1_shape=shape, mix_o1=level, osc1_digital=digital, osc1_pwm=pwm)
+        return self
+
+    def o2(self, wave, octave=0, pitch=0, fine=0.0, shape=0.0, level=0.6, digital=0, pwm=0.0):
+        self.t1.update(osc2_wave=wave, osc2_octave=octave, osc2_pitch=pitch, osc2_fine=fine,
+                       osc2_shape=shape, mix_o2=level, osc2_level=1.0 if level > 0 else 0.0,
+                       osc2_digital=digital, osc2_pwm=pwm)
+        return self
+
+    def noise(self, level):
+        self.t1["mix_noise"] = level
+        return self
+
+    # --- effects (shared)
+    def chorus(self, mix=0.3, depth=0.35, rate=0.25, kind=1):
+        self.sh.update(modfx_type=kind, modfx_mix=mix, modfx_depth=depth, modfx_rate=rate)
+        return self
+
+    def delay(self, div="3/16", fb=0.3, mix=0.18, kind=2):
+        self.sh.update(delay_sync=DIV[div], delay_feedback=fb, delay_mix=mix, delay_type=kind)
+        return self
+
+    def verb(self, mix=0.22, size=0.55, damp=0.5):
+        self.sh.update(reverb_on=1, reverb_mix=mix, reverb_size=size, reverb_damp=damp)
+        return self
+
+    def drive(self, amount=0.3, mix=0.5):
+        self.sh.update(drive_on=1, drive_amount=amount, drive_mix=mix)
+        return self
+
+    def sat(self, amount=0.3, tone=0.6, tube=False):
+        self.sh.update(sat_on=1, sat_amount=amount, sat_tone=tone, sat_mode=1 if tube else 0)
+        return self
+
+    def eq(self, low=0.0, high=0.0):
+        self.sh.update(eq_low=low, eq_high=high)
+        return self
+
+    def arp(self, rate="1/16", mode=ARP_UP, gate=0.55, octaves=1, tempo=124.0, swing=0.0,
+            steps=None, latch=False):
+        self.sh.update(arp_on=1, arp_rate=ARP[rate], arp_mode=mode, arp_gate=gate,
+                       arp_octaves=octaves, song_tempo=tempo, arp_swing=swing,
+                       arp_latch=1 if latch else 0)
+        if steps:
+            self.sh["arp_last_step"] = len(steps)
+            for k in range(8):
+                self.sh[f"arp_step{k + 1}"] = 1 if k < len(steps) and steps[k] == "x" else 0
+        return self
+
+    def keep_in_tune(self, limit=24.0):
+        """Fine tune + DETUNE spread (+-15 c x detune, +25 c x detune on a mono
+        stack) stays within `limit` cents per oscillator, so chords and
+        unisons never read as out of key. Unison assign (4 voices) is free."""
+        for pre, t in (("", self.t1), ("t2_", self.t2)):
+            if t is None:
+                continue
+            det = self.sh[pre + "voice_detune"]
+            uni = 25.0 * det if self.sh[pre + "voice_poly"] == 1 and det > 0.01 else 0.0
+            for o, sign in (("osc1", -15.0), ("osc2", 15.0)):
+                room = max(0.0, limit - uni)
+                spread = sign * det
+                t[o + "_fine"] = min(room - spread, max(-room - spread, t[o + "_fine"]))
+
+    def values(self):
+        self.keep_in_tune()
+        vals = {}
+        for k, v in self.t1.items():
+            vals[k] = v
+        t2 = self.t2 if self.t2 is not None else self.t1
+        for k, v in t2.items():
+            vals["t2_" + k] = v
+        vals.update(self.sh)
+        out = []
+        for k in KIDS:
+            if k in vals:
+                v = float(vals[k])
+            elif k in RANGE:
+                v = RANGE[k][2]
+            else:
+                v = 0.0
+            if k in RANGE:
+                lo, hi, _ = RANGE[k]
+                v = min(hi, max(lo, v))
+            elif k in NCHOICE:
+                v = float(min(NCHOICE[k] - 1, max(0, int(round(v)))))
+            out.append(round(v, 4))
+        return out
 
 
-def build_one(idx, rng, accepted, salt=0):
-    """Re-roll until the preset is distinct from everything accepted so far.
-    salt > 0 (from Tools/bank_salts.json) = the audio check flagged this slot
-    as sounding like an earlier preset: vary harder."""
-    recipe_name = PATCHES[idx][1].__name__
-    if _protected(recipe_name) == "*" or PATCHES[idx][0].startswith("Init"):
-        # Init voices stay vanilla starting points
-        return build_candidate(idx, rng, 0)
-    best, best_score = None, -1.0
-    for attempt in range(80):
-        n_moves = 2 + attempt // 8 + 2 * salt  # escalate variation when stuck
-        cand = build_candidate(idx, rng, n_moves)
-        worst = 1e9
-        ok = True
-        for other in accepted:
-            d, same, mx = distance(cand[3], other)
-            score = d if not same else min(d, MIN_D * mx / MIN_KNOB)
-            worst = min(worst, score)
-            if d < MIN_D or (same and mx < MIN_KNOB):
-                ok = False
-                if worst < best_score:
+# ---------------------------------------------------------------- recipes
+# Each recipe builds variant v (0..n-1) of an archetype. Variation is chosen,
+# not rolled: lists of musically sensible settings indexed by v, with a
+# little seeded jitter on top so neighbours never sound identical.
+
+def pick(seq, v):
+    return seq[v % len(seq)]
+
+
+def j(rng, x, amt):
+    return x + rng.uniform(-amt, amt)
+
+
+# ============================== BASS
+def b_808(v, rng):
+    p = Patch().mono(glide=pick([0.0, 0.0, 0.22, 0.3], v), legato=v % 4 >= 2)
+    p.o1(W_SIN, octave=-1, level=0.95).filt(2400, key=0.0)
+    p.amp(0.0, pick([0.8, 1.1, 0.6, 1.5, 0.9], v), 0.0, pick([0.15, 0.25, 0.12], v), vel=0.15)
+    if v == 0:
+        return p, ["808", "Sub"]                       # clean: pure sine, nothing else
+    p.fenv(0.0, 0.06, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, pick([0.12, 0.08, 0.16, 0.1], v))
+    if v % 3 == 1:
+        p.sat(pick([0.35, 0.5, 0.25], v), 0.45)
+    if v % 3 == 2:
+        p.o1(W_TRI, octave=-1, level=0.95).drive(0.25, 0.35)
+    tags = ["808", "Sub"] + (["Glide"] if v % 4 >= 2 else [])
+    return p, tags
+
+
+def b_sub(v, rng):
+    p = Patch().mono(glide=pick([0.0, 0.12], v), legato=True)
+    p.o1(pick([W_SIN, W_TRI, W_SIN, W_SQR], v), octave=-1, level=0.9)
+    p.o2(W_SIN, octave=-1, level=0.0)
+    if v % 4 == 3:
+        p.filt(220, 0.0)
+    else:
+        p.filt(900, 0.0, key=0.0)
+    p.amp(0.004, 0.2, 1.0, 0.12, vel=0.1)
+    if v % 2:
+        p.o2(W_SQR, octave=0, level=0.18)              # a little edge an octave up
+        p.filt(pick([500, 650, 420], v), 0.05)
+    return p, ["Sub"]
+
+
+def b_reese(v, rng):
+    det = pick([12.0, 18.0, 9.0, 24.0, 15.0], v)
+    p = Patch().mono(glide=pick([0.0, 0.18], v), legato=True)
+    p.o1(W_SAW, octave=-1, fine=-det, level=0.75).o2(W_SAW, octave=-1, fine=det, level=0.75)
+    p.filt(pick([700, 900, 550, 1200, 800], v), pick([0.12, 0.2, 0.08], v))
+    p.fenv(0.0, 0.4, 0.6, 0.2, amt=0.12).amp(0.003, 0.3, 1.0, 0.15, vel=0.1)
+    p.lfo1(L_TRI, hz=pick([0.15, 0.3, 0.22], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, pick([0.12, 0.18, 0.08], v))
+    if v % 2:
+        p.chorus(0.25, 0.3, 0.12, kind=pick([3, 2], v // 2))   # phaser / flanger movement
+    if v % 3 == 0:
+        p.drive(pick([0.3, 0.45], v), 0.4)
+    p.eq(low=1.5)
+    return p, ["Reese"]
+
+
+def b_growl(v, rng):
+    div = pick(["1/8", "1/16", "1/8", "1/4", "1/12"], v)
+    p = Patch().mono(glide=0.08, legato=True)
+    if v % 2 == 0:
+        p.o1(W_SAW, octave=-1, level=0.7).o2(W_SQR, octave=-1, fine=7, level=0.6, shape=0.3)
+        p.t1["fm_amt"] = pick([0.25, 0.35, 0.2], v)
+    else:
+        p.o1(W_DIG, octave=-1, digital=dig(pick(["metal", "vocal", "bright"], v), v), level=0.8)
+        p.o2(W_SAW, octave=-1, fine=-6, level=0.5)
+    p.filt(pick([900, 1200, 700], v), pick([0.35, 0.45, 0.3], v), kind=pick([F_LP24, F_BP12, F_LP12], v))
+    p.lfo1(pick([L_SIN, L_TRI, L_SAW], v), sync=div, depth=1.0, key=1)
+    p.mod(1, S_LFO1, D_CUT, pick([0.55, 0.45, 0.65], v)).mod(3, S_LFO1, D_O1SHAPE, 0.5)
+    p.amp(0.002, 0.3, 1.0, 0.12, vel=0.1).drive(pick([0.45, 0.55, 0.4], v), 0.6).eq(low=2.0, high=1.5)
+    p.sh["song_tempo"] = pick([140.0, 150.0, 174.0], v)
+    return p, ["Growl", "Distorted"]
+
+
+def b_wobble(v, rng):
+    div = pick(["1/4", "1/8", "1/8", "1/6", "3/8", "1/16"], v)
+    p = Patch().mono(glide=0.1, legato=True)
+    p.o1(W_SAW, octave=-1, level=0.7).o2(pick([W_SQR, W_SAW], v), octave=-1, fine=pick([5, -8], v), level=0.6)
+    p.filt(pick([180, 220, 150], v), pick([0.35, 0.45, 0.4], v), key=0.3)
+    p.lfo1(pick([L_SIN, L_TRI, L_SIN, L_SQR], v), sync=div, depth=1.0, key=1)
+    p.mod(1, S_LFO1, D_CUT, pick([0.75, 0.65, 0.8], v)).mod(4, S_WHEEL, D_L1RATE, 0.5)
+    p.amp(0.002, 0.3, 1.0, 0.15, vel=0.1).drive(pick([0.3, 0.4], v), 0.45).eq(low=2.0)
+    p.sh["song_tempo"] = pick([140.0, 150.0, 128.0], v)
+    return p, ["Wobble"]
+
+
+def b_pluck(v, rng):
+    p = Patch().mono(t2=False) if v % 3 else Patch()
+    p.o1(pick([W_SAW, W_SQR, W_SAW], v), octave=-1, shape=pick([0.0, 0.3], v), level=0.8)
+    p.o2(pick([W_SQR, W_SAW, W_SIN], v), octave=pick([-1, -2], v), fine=pick([4, -5, 0], v), level=0.5)
+    p.filt(pick([180, 240, 300, 150], v), pick([0.2, 0.3, 0.12], v))
+    p.fenv(0.0, pick([0.18, 0.25, 0.12, 0.3], v), 0.0, 0.15, amt=pick([0.45, 0.55, 0.4], v))
+    p.amp(0.0, pick([0.35, 0.5, 0.28], v), pick([0.15, 0.0, 0.25], v), 0.12, vel=0.4)
+    p.mod(4, S_VEL, D_CUT, 0.15)
+    if v % 4 == 3:
+        p.sat(0.3, 0.55)
+    return p, ["Pluck"]
+
+
+def b_house(v, rng):
+    p = Patch().mono(t2=False)
+    if v % 2 == 0:                                      # organ-ish: sine + square an octave up
+        p.o1(W_SIN, octave=-1, level=0.85).o2(W_SQR, octave=0, level=0.3)
+        p.filt(pick([1400, 1800, 1100], v), 0.0)
+    else:                                               # rubbery: square through a short env
+        p.o1(W_SQR, octave=-1, shape=pick([0.2, 0.35], v), level=0.8).o2(W_SIN, octave=-1, level=0.5)
+        p.filt(pick([350, 450], v), 0.25).fenv(0.0, 0.16, 0.1, 0.1, amt=0.35)
+    p.amp(0.0, pick([0.25, 0.32, 0.2], v), pick([0.0, 0.3], v), 0.08, vel=0.35)
+    p.sh["song_tempo"] = 124.0
+    return p, ["House"]
+
+
+def b_analog(v, rng):
+    p = Patch().mono(glide=pick([0.0, 0.2, 0.0, 0.3], v), legato=v % 2 == 1)
+    p.o1(W_SAW, octave=-1, level=0.8).o2(pick([W_SQR, W_SAW, W_SQR], v), octave=pick([-1, -2], v),
+                                         fine=pick([6, -4, 8], v), level=0.6, shape=pick([0.0, 0.25], v))
+    p.filt(pick([320, 450, 260, 600], v), pick([0.25, 0.15, 0.35], v))
+    p.fenv(0.0, pick([0.3, 0.45, 0.22], v), pick([0.2, 0.35, 0.1], v), 0.2, amt=pick([0.35, 0.28, 0.42], v))
+    p.amp(0.002, 0.4, 0.9, 0.15, vel=0.3)
+    if v % 3 == 2:
+        p.sat(0.35, 0.5, tube=True)
+    tags = ["Analog"] + (["Glide"] if p.sh["voice_portamento"] > 0 else [])
+    return p, tags
+
+
+def b_acid(v, rng):
+    p = Patch().mono(glide=pick([0.14, 0.18], v), legato=True)
+    p.o1(pick([W_SAW, W_SQR, W_SAW], v), octave=-1, level=0.85).o2(W_SAW, level=0.0)
+    p.filt(pick([260, 320, 220], v), pick([0.72, 0.65, 0.78], v), kind=F_LP24, key=0.35)
+    p.fenv(0.0, pick([0.18, 0.25, 0.14], v), 0.0, 0.1, amt=pick([0.5, 0.42, 0.58], v))
+    p.amp(0.0, 0.3, 0.85, 0.08, vel=0.2).mod(4, S_VEL, D_CUT, 0.2)
+    p.drive(pick([0.35, 0.5, 0.25], v), 0.45)
+    if v % 2:
+        p.delay("3/16", 0.25, 0.12)
+    return p, ["Acid", "Glide"]
+
+
+def b_fm(v, rng):
+    p = Patch().mono(t2=False)
+    p.o1(W_SIN, octave=-1, level=0.9).o2(W_SIN, octave=pick([0, 1, 0], v), level=0.0)
+    p.t1["fm_amt"] = pick([0.35, 0.28, 0.42], v)
+    p.filt(pick([1200, 900, 1600], v), 0.1).fenv(0.0, 0.2, 0.25, 0.15, amt=0.3)
+    p.amp(0.0, 0.5, pick([0.6, 0.4], v), 0.12, vel=0.35)
+    if v % 2:
+        p.mod(1, S_ENV1, D_PITCH, 0.03)
+    return p, ["FM"]
+
+
+# ============================== LEAD
+def l_supersaw(v, rng):
+    p = Patch().unison(pick([24.0, 30.0, 20.0, 35.0, 27.0], v))
+    p.o1(W_SAW, level=0.7).o2(W_SAW, octave=pick([0, 1, 0, -1], v), fine=pick([7, 5, 10], v), level=0.55)
+    p.filt(pick([5200, 7000, 4200, 8800], v), 0.1).fenv(0.0, 0.5, 0.6, 0.3, amt=0.12)
+    p.amp(0.004, 0.4, 1.0, pick([0.35, 0.5, 0.25], v), vel=0.2)
+    p.chorus(0.22, 0.3, 0.3).delay(pick(["3/16", "1/8", "1/4"], v), 0.32, 0.18).verb(0.2, 0.6)
+    p.sh["voice_portamento"] = p.sh["t2_voice_portamento"] = pick([0.0, 0.12], v)
+    return p, ["Supersaw"]
+
+
+def l_square(v, rng):
+    p = Patch().mono(glide=pick([0.0, 0.1, 0.16], v), legato=v % 3 > 0)
+    p.o1(W_SQR, shape=pick([0.0, 0.35, 0.6], v), level=0.75).o2(W_SQR, octave=pick([0, 1], v), fine=4, level=0.3)
+    p.filt(pick([3800, 5000, 2600], v), 0.1).amp(0.003, 0.3, 1.0, 0.2, vel=0.2)
+    p.lfo2(L_TRI, 5.5).sh["voice_vib"] = 0.5
+    p.mod(3, S_WHEEL, D_O1SHAPE, 0.0)
+    p.delay(pick(["1/8", "3/16"], v), 0.28, 0.15).verb(0.12, 0.45)
+    return p, ["Square", "Chip" if v % 2 else "Mono"]
+
+
+def l_sync(v, rng):
+    p = Patch().mono(glide=pick([0.0, 0.12], v), legato=True)
+    p.o1(W_SAW, level=0.0).o2(W_SAW, pitch=pick([7, 12, 5, 0], v), level=0.85)
+    p.t1["osc_mod"] = 2
+    p.fenv(0.0, pick([0.35, 0.6, 0.25], v), pick([0.15, 0.3], v), 0.3)
+    p.mod(2, S_ENV1, D_O2PITCH, pick([0.6, 0.45, 0.75], v)).mod(1, S_WHEEL, D_O2PITCH, 0.4)
+    p.filt(pick([4500, 6500, 3500], v), 0.12).amp(0.003, 0.3, 1.0, 0.25, vel=0.2)
+    p.delay("3/16", 0.3, 0.16).verb(0.14, 0.5)
+    if v % 3 == 2:
+        p.drive(0.3, 0.4)
+    return p, ["Sync"]
+
+
+def l_glide(v, rng):
+    p = Patch().mono(glide=pick([0.28, 0.36, 0.22, 0.42], v), legato=True)
+    p.o1(pick([W_SAW, W_SAW, W_SQR], v), level=0.75).o2(W_SAW, fine=pick([-7, 9, -5], v), level=0.6)
+    p.filt(pick([2800, 3600, 2200, 4400], v), pick([0.25, 0.18, 0.32], v))
+    p.fenv(0.0, 0.5, 0.45, 0.3, amt=0.2).amp(0.004, 0.3, 1.0, 0.3, vel=0.15)
+    p.lfo2(L_SIN, 5.2).sh["voice_vib"] = 0.6
+    p.delay(pick(["1/4", "3/16", "1/8"], v), 0.38, 0.2).verb(0.18, 0.6)
+    if v % 4 == 1:
+        p.sat(0.3, 0.6, tube=True)
+    return p, ["Glide", "Mono"]
+
+
+def l_soft(v, rng):
+    p = Patch().mono(glide=pick([0.1, 0.0], v), legato=True)
+    p.o1(pick([W_SIN, W_TRI, W_TRI], v), level=0.85)
+    p.o2(W_SIN, octave=1, level=pick([0.15, 0.0, 0.25], v)).noise(pick([0.04, 0.08, 0.0], v))
+    p.filt(pick([3000, 2400, 4200], v), 0.0).amp(pick([0.04, 0.07, 0.02], v), 0.3, 1.0, 0.35, vel=0.3)
+    p.lfo2(L_SIN, 5.0).sh["voice_vib"] = 0.7
+    p.mod(3, S_LFO2, D_PITCH, 0.0)
+    p.chorus(0.15, 0.2, 0.2).delay("1/4", 0.35, 0.18).verb(0.25, 0.65)
+    return p, ["Soft"]
+
+
+def l_digital(v, rng):
+    fam = pick(["vocal", "bright", "reed", "vocal", "analog", "metal", "bright"], v)
+    p = Patch().mono(glide=pick([0.0, 0.14], v), legato=True)
+    p.o1(W_DIG, digital=dig(fam, v, v % 2), level=0.8).o2(W_SAW, fine=6, level=pick([0.25, 0.0, 0.35], v))
+    p.filt(pick([4200, 3000, 6000], v), 0.12).amp(0.005, 0.3, 1.0, 0.25, vel=0.2)
+    p.lfo1(L_TRI, hz=pick([0.6, 1.2, 0.3], v), depth=0.6).mod(1, S_LFO1, D_CUT, 0.08)
+    p.mod(3, S_WHEEL, D_O1SHAPE, 0.5)
+    p.lfo2(L_SIN, 5.3).sh["voice_vib"] = 0.5
+    p.delay(pick(["3/16", "1/8"], v), 0.3, 0.15).verb(0.15, 0.55)
+    return p, ["Digital"] + (["Vocal"] if fam == "vocal" else [])
+
+
+def l_rave(v, rng):
+    p = Patch().unison(pick([35.0, 45.0, 28.0], v))
+    p.sh["voice_portamento"] = p.sh["t2_voice_portamento"] = 0.12
+    p.o1(W_SQR, shape=0.25, pwm=0.4, level=0.7).o2(W_SAW, octave=-1, fine=-8, level=0.5)
+    p.lfo1(L_TRI, hz=pick([3.5, 5.0, 2.5], v), depth=0.8, key=0)
+    p.fenv(0.0, 0.25, 0.0, 0.2).mod(2, S_ENV1, D_PITCH, -pick([0.08, 0.12, 0.05], v))
+    p.filt(pick([3200, 4500, 2500], v), 0.15).amp(0.003, 0.3, 1.0, 0.2, vel=0.15)
+    p.chorus(0.3, 0.45, 0.35).drive(0.3, 0.35).verb(0.15, 0.55)
+    return p, ["Rave"]
+
+
+def l_pluck(v, rng):
+    p = Patch()
+    p.o1(W_SAW, level=0.7).o2(pick([W_SQR, W_SAW], v), octave=pick([1, 0], v), fine=6, level=0.45)
+    p.filt(pick([700, 900, 550], v), 0.2).fenv(0.0, pick([0.22, 0.3, 0.18], v), 0.1, 0.25, amt=0.5)
+    p.amp(0.0, 0.45, 0.35, 0.3, vel=0.4).spread(0.4)
+    p.delay(pick(["3/16", "1/8"], v), 0.38, 0.22).verb(0.18, 0.55)
+    return p, ["Pluck"]
+
+
+# ============================== PAD
+def pd_supersaw(v, rng):
+    p = Patch().spread(pick([0.6, 0.75, 0.5, 0.85], v))
+    p.o1(W_SAW, level=0.65).o2(W_SAW, octave=pick([0, 1, 0, -1], v), fine=pick([9, 6, 12], v), level=0.55)
+    p.filt(pick([3500, 5000, 2600, 6500], v), 0.08).amp(pick([0.35, 0.6, 0.2, 0.9], v), 1.0, 1.0,
+                                                        pick([1.6, 2.4, 1.2], v), vel=0.15)
+    p.wide(pick([11.0, 8.0, 14.0], v), 0.45)
+    p.chorus(0.3, 0.4, 0.2).verb(pick([0.3, 0.35, 0.25], v), 0.75, 0.45)
+    if v % 3 == 1:
+        p.delay("1/4", 0.35, 0.12)
+    return p, ["Supersaw", "Wide"]
+
+
+def pd_warm(v, rng):
+    p = Patch().spread(0.35)
+    p.o1(W_SAW, level=0.65).o2(pick([W_SQR, W_SAW, W_TRI], v), octave=pick([0, -1], v), fine=7, level=0.55)
+    p.filt(pick([900, 1300, 700, 1700], v), pick([0.15, 0.22, 0.1], v))
+    p.fenv(pick([0.6, 1.0, 0.4], v), 1.5, 0.6, 1.5, amt=pick([0.15, 0.2, 0.1], v))
+    p.amp(pick([0.5, 0.8, 0.3], v), 1.0, 1.0, pick([1.5, 2.0, 1.2], v), vel=0.15)
+    p.lfo1(L_TRI, hz=pick([0.12, 0.2, 0.08], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.08)
+    p.wide(7.0, 0.3)
+    p.chorus(0.3, 0.35, 0.18).verb(0.25, 0.7, 0.6)
+    if v % 3 == 0:
+        p.sat(0.25, 0.45, tube=True)
+    return p, ["Warm", "Analog"]
+
+
+def pd_airy(v, rng):
+    p = Patch().spread(0.5)
+    p.o1(pick([W_SAW, W_TRI, W_SAW], v), octave=pick([0, 1], v), level=0.9).o2(W_SAW, octave=1, fine=8, level=0.6)
+    p.noise(pick([0.12, 0.2, 0.08], v))
+    p.filt(pick([260, 180, 340], v), 0.1, kind=F_HP12).amp(pick([0.8, 1.2, 0.5], v), 1.0, 1.0, 2.5, vel=0.1)
+    p.lfo1(L_SIN, hz=0.1, depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.1)
+    p.wide(10.0, 0.5)
+    p.chorus(0.35, 0.45, 0.2).delay("1/4", 0.4, 0.15).verb(0.4, 0.85, 0.35).eq(high=2.0)
+    return p, ["Airy"]
+
+
+def pd_evolving(v, rng):
+    fam = pick(["analog", "bright", "vocal", "wood", "detune", "reed"], v)
+    p = Patch().spread(0.3)
+    p.o1(W_DIG, digital=dig(fam, v), level=0.6).o2(W_SAW, octave=pick([0, -1], v), fine=6, level=0.45)
+    p.filt(pick([1500, 2200, 1100], v), 0.2).amp(pick([1.0, 1.5, 0.7], v), 1.0, 1.0, 2.5, vel=0.1)
+    p.lfo1(pick([L_TRI, L_SIN, L_RND], v), hz=pick([0.08, 0.15, 0.05], v), depth=1.0, key=0)
+    p.mod(1, S_LFO1, D_CUT, 0.15).mod(3, S_LFO1, D_O1SHAPE, 0.5)
+    p.layer(0.5, osc1_digital=dig(fam, v + 3, 1), amp_pan=0.35, osc1_fine=-7)
+    p.t1["amp_pan"] = -0.35
+    p.chorus(0.25, 0.4, 0.15).delay("3/8", 0.45, 0.14).verb(0.35, 0.8, 0.45)
+    return p, ["Evolving", "Digital"]
+
+
+def pd_dark(v, rng):
+    p = Patch().spread(0.4)
+    p.o1(W_SAW, octave=-1, level=0.65).o2(pick([W_SQR, W_SAW], v), octave=-1, fine=-9, level=0.5)
+    p.filt(pick([400, 550, 320, 700], v), pick([0.25, 0.18], v))
+    p.amp(pick([0.8, 1.2], v), 1.0, 1.0, 2.5, vel=0.1)
+    p.lfo1(L_SIN, hz=pick([0.07, 0.11], v), depth=1.0, key=0).mod(1, S_LFO1, D_CUT, 0.1)
+    p.layer(0.45, osc1_octave=0, osc2_octave=0, filter_cutoff=cut(pick([900, 1200], v)), amp_pan=0.25)
+    p.chorus(0.2, 0.3, 0.15, kind=3).verb(0.35, 0.85, 0.65)
+    return p, ["Dark", "Cinematic"]
+
+
+def pd_glass(v, rng):
+    p = Patch().spread(0.25)
+    p.o1(W_DIG, digital=dig(pick(["bell", "bright", "metal"], v), v), level=0.55)
+    p.o2(W_SIN, octave=1, level=0.35)
+    p.filt(pick([5000, 7000, 3800], v), 0.05).amp(pick([0.4, 0.7], v), 1.2, 0.8, 2.2, vel=0.25)
+    p.wide(6.0, 0.4)
+    p.chorus(0.25, 0.3, 0.2).delay("3/16", 0.4, 0.16).verb(0.35, 0.75, 0.35).eq(high=1.5)
+    return p, ["Glass"]
+
+
+def pd_strings(v, rng):
+    p = Patch().spread(0.3)
+    p.o1(W_SQR, shape=0.2, pwm=pick([0.5, 0.35, 0.6], v), level=0.65).o2(W_SAW, fine=6, level=0.45)
+    p.lfo1(L_TRI, hz=pick([0.6, 0.9, 0.4], v), depth=1.0, key=0)
+    p.filt(pick([2400, 3200, 1800], v), 0.05).amp(pick([0.35, 0.5, 0.25], v), 1.0, 1.0, 1.2, vel=0.3)
+    p.lfo2(L_SIN, 5.0).sh["voice_vib"] = 0.4
+    p.wide(5.0, 0.35).chorus(0.4, 0.45, 0.22).verb(0.3, 0.7, 0.55)
+    return p, ["Strings"]
+
+
+# ============================== PLUCK
+def pl_future(v, rng):
+    p = Patch().spread(pick([0.6, 0.75, 0.5], v))
+    p.o1(W_SAW, level=0.65).o2(W_SAW, octave=pick([0, 1], v), fine=10, level=0.5)
+    p.filt(pick([600, 800, 450], v), 0.15).fenv(0.0, pick([0.25, 0.35, 0.2], v), 0.05, 0.3, amt=0.5)
+    p.amp(0.0, pick([0.5, 0.7, 0.4], v), 0.0, 0.4, vel=0.35)
+    p.wide(9.0, 0.4).chorus(0.25, 0.35, 0.25).delay(pick(["3/16", "1/8"], v), 0.35, 0.2).verb(0.25, 0.65)
+    return p, ["Future", "Chord"]
+
+
+def pl_mallet(v, rng):
+    p = Patch()
+    p.o1(pick([W_SIN, W_TRI, W_SIN], v), level=0.85).o2(W_SIN, octave=pick([2, 1, 2], v), level=0.0)
+    p.t1["fm_amt"] = pick([0.12, 0.2, 0.08], v)
+    p.filt(5000, 0.0).amp(0.0, pick([0.4, 0.6, 0.3], v), 0.0, 0.4, vel=0.5)
+    p.chorus(0.15, 0.2, 0.2).verb(0.22, 0.55)
+    if v % 2:
+        p.delay("1/8", 0.25, 0.12)
+    return p, ["Mallet"]
+
+
+def pl_deep(v, rng):
+    p = Patch().spread(0.2)
+    p.o1(pick([W_SQR, W_SAW], v), shape=0.2, level=0.7).o2(W_SAW, fine=-7, level=0.5)
+    p.filt(pick([450, 650, 350], v), pick([0.3, 0.2], v)).fenv(0.0, pick([0.3, 0.45], v), 0.15, 0.3, amt=0.35)
+    p.amp(0.0, 0.6, 0.2, 0.35, vel=0.4)
+    p.chorus(0.25, 0.3, 0.2).delay("3/16", 0.4, 0.22).verb(0.25, 0.6, 0.6)
+    p.sh["song_tempo"] = 122.0
+    return p, ["Deep", "House"]
+
+
+def pl_kalimba(v, rng):
+    p = Patch()
+    p.o1(W_DIG, digital=dig(pick(["wood", "bell", "wood"], v), v), level=0.75).o2(W_SIN, octave=1, level=0.3)
+    p.filt(pick([3500, 5000, 2600], v), 0.05).amp(0.0, pick([0.35, 0.5, 0.25], v), 0.0, 0.35, vel=0.5)
+    p.delay("1/8", 0.25, 0.15).verb(0.2, 0.5)
+    return p, ["Wood"]
+
+
+def pl_harp(v, rng):
+    p = Patch()
+    p.o1(pick([W_SAW, W_TRI, W_SQR], v), level=0.7).o2(W_SAW, fine=5, level=0.3, octave=pick([0, 1], v))
+    p.filt(pick([1500, 2200, 1100], v), 0.1).fenv(0.0, pick([0.4, 0.6], v), 0.0, 0.5, amt=0.35)
+    p.amp(0.0, pick([0.9, 1.3, 0.7], v), 0.0, 0.8, vel=0.45)
+    p.chorus(0.2, 0.25, 0.2).verb(0.3, 0.7)
+    return p, ["Harp" if v % 2 else "String"]
+
+
+# ============================== KEYS
+def k_ep(v, rng):
+    p = Patch()
+    p.o1(W_SIN, level=0.85).o2(W_SIN, octave=pick([1, 2, 1], v), level=0.0)
+    p.t1["fm_amt"] = pick([0.18, 0.24, 0.12, 0.3], v)
+    p.o2(W_SIN, octave=pick([1, 2, 1], v), level=pick([0.0, 0.1], v))
+    p.filt(pick([3500, 2600, 4500], v), 0.0).amp(0.0, pick([1.5, 2.2, 1.1], v), 0.25, 0.4, vel=0.6)
+    p.mod(4, S_VEL, D_CUT, 0.2)
+    p.chorus(pick([0.3, 0.2, 0.4], v), 0.35, pick([0.3, 0.45], v), kind=pick([1, 3], v // 3))
+    p.verb(0.18, 0.5)
+    if v % 3 == 2:
+        p.sat(0.3, 0.5, tube=True)
+    return p, ["EP"]
+
+
+def k_organ(v, rng):
+    p = Patch()
+    p.o1(pick([W_SIN, W_SQR, W_SIN], v), level=0.75).o2(W_SIN, octave=1, level=0.55)
+    if v % 3 == 1:
+        p.o2(W_SIN, octave=1, pitch=7, level=0.4)
+    p.filt(pick([4000, 2800, 5000], v), 0.0).amp(0.002, 0.2, 1.0, 0.08, vel=0.1)
+    p.chorus(0.35, 0.4, pick([0.55, 0.35], v), kind=pick([1, 3], v))
+    if v % 2:
+        p.drive(0.25, 0.35)
+    p.verb(0.12, 0.45)
+    p.sh["song_tempo"] = 122.0
+    return p, ["Organ"]
+
+
+def k_stab(v, rng):
+    p = Patch().spread(0.3)
+    p.o1(W_SAW, level=0.85).o2(pick([W_SQR, W_SAW], v), fine=6, level=0.65)
+    p.filt(pick([1800, 2600, 1300], v), 0.15).fenv(0.0, 0.25, 0.0, 0.15, amt=0.3)
+    p.amp(0.0, pick([0.45, 0.6, 0.35], v), pick([0.0, 0.25], v), 0.2, vel=0.4)
+    p.chorus(0.25, 0.3, 0.25).delay("1/8", 0.3, 0.15).verb(0.15, 0.5)
+    return p, ["Chord", "Stab"]
+
+
+def k_clav(v, rng):
+    p = Patch()
+    p.o1(pick([W_SQR, W_DIG], v), shape=0.55, digital=dig("reed", v), level=0.95).o2(W_SAW, octave=1, level=0.4)
+    p.filt(pick([2400, 3200], v), 0.3, kind=F_LP12).fenv(0.0, 0.15, 0.1, 0.1, amt=0.35)
+    p.amp(0.0, 0.4, 0.3, 0.1, vel=0.6).chorus(0.2, 0.3, 0.3, kind=3)
+    return p, ["Clav"]
+
+
+# ============================== BELL
+def bl_fm(v, rng):
+    p = Patch()
+    p.o1(W_SIN, level=0.8).o2(W_SIN, octave=pick([2, 1, 2, 1], v), level=pick([0.0, 0.0, 0.12], v))
+    p.t1["fm_amt"] = pick([0.34, 0.24, 0.42, 0.3, 0.5], v)
+    p.filt(8000, 0.0).amp(0.0, pick([2.5, 3.5, 1.8], v), 0.0, 2.0, vel=0.5)
+    p.chorus(0.2, 0.25, 0.15).delay("3/16", 0.35, 0.14).verb(0.3, 0.75, 0.35)
+    return p, ["FM"]
+
+
+def bl_digital(v, rng):
+    p = Patch()
+    p.o1(W_DIG, digital=dig(pick(["bell", "metal", "bell", "bright"], v), v, v % 2), level=0.75)
+    p.o2(W_SIN, octave=2, level=0.2)
+    p.filt(9000, 0.0).amp(0.0, pick([2.0, 2.8, 1.5], v), 0.0, 1.6, vel=0.45)
+    p.wide(5.0, 0.3).delay("1/4", 0.35, 0.14).verb(0.3, 0.7, 0.35)
+    return p, ["Digital"]
+
+
+# ============================== ARP / SEQUENCE
+def a_arp(v, rng):
+    src = v % 6
+    p = Patch()
+    if src == 0:        # supersaw trance arp
+        p.spread(0.6).o1(W_SAW, level=0.65).o2(W_SAW, fine=10, level=0.5).filt(2600, 0.15)
+        p.fenv(0.0, 0.18, 0.2, 0.1, amt=0.35).amp(0.0, 0.25, 0.5, 0.15)
+        p.delay("3/16", 0.35, 0.2).verb(0.2, 0.6)
+        tempo, tags = 138.0, ["Trance"]
+    elif src == 1:      # square bleeps
+        p.o1(W_SQR, shape=0.3, level=0.75).filt(4000, 0.05).amp(0.0, 0.15, 0.3, 0.1)
+        p.delay("1/8", 0.3, 0.15)
+        tempo, tags = 124.0, ["Square"]
+    elif src == 2:      # digital sparkle
+        p.o1(W_DIG, digital=dig(pick(["bell", "bright"], v), v), level=0.75).o2(W_SIN, octave=1, level=0.25)
+        p.filt(7000).amp(0.0, 0.3, 0.0, 0.25, vel=0.3).delay("3/16", 0.4, 0.2).verb(0.25, 0.65)
+        tempo, tags = 120.0, ["Digital"]
+    elif src == 3:      # resonant pluck
+        p.o1(W_SAW, level=0.75).filt(500, 0.45).fenv(0.0, 0.14, 0.0, 0.1, amt=0.45)
+        p.amp(0.0, 0.2, 0.2, 0.1).delay("1/8", 0.3, 0.12)
+        tempo, tags = 128.0, ["Pluck"]
+    elif src == 4:      # soft sine / FM ripples
+        p.o1(W_SIN, level=0.85).o2(W_SIN, octave=1, level=0.0)
+        p.t1["fm_amt"] = 0.15
+        p.amp(0.0, 0.35, 0.0, 0.3, vel=0.3).chorus(0.2, 0.25, 0.2).delay("1/4", 0.4, 0.2).verb(0.3, 0.7)
+        tempo, tags = 110.0, ["Soft"]
+    else:               # synthwave saw arp
+        p.o1(W_SAW, level=0.7).o2(W_SQR, octave=-1, level=0.4).filt(1400, 0.2)
+        p.fenv(0.0, 0.2, 0.2, 0.1, amt=0.3).amp(0.0, 0.25, 0.4, 0.12).chorus(0.25, 0.35, 0.2)
+        p.delay("3/16", 0.35, 0.15).verb(0.15, 0.55)
+        tempo, tags = 100.0, ["Retro"]
+    p.arp(rate=pick(["1/16", "1/16", "1/8", "1/16T", "1/16"], v // 6), mode=pick([ARP_UP, ARP_ALT1, ARP_UP, ARP_DOWN, ARP_ALT2, ARP_RND], v),
+          gate=pick([0.5, 0.65, 0.4], v), octaves=pick([1, 2, 2, 1, 3], v // 2), tempo=tempo)
+    return p, tags
+
+
+SEQ_STEPS = ["xx.xx.x.", "x.xx.xx.", "x..x..x.", "xxx.xx.x", "x.x.xxx.", "x..xx.x.", "xx.x.xx.", "x.xxx..x"]
+
+
+def s_seq(v, rng):
+    p = Patch()
+    if v % 3 == 0:       # bass sequence
+        p.mono(t2=False).o1(W_SAW, octave=-1, level=0.8).o2(W_SQR, octave=-1, fine=5, level=0.5)
+        p.filt(280, 0.35).fenv(0.0, 0.15, 0.0, 0.1, amt=0.45).amp(0.0, 0.2, 0.3, 0.08)
+        tags = ["Bass"]
+    elif v % 3 == 1:     # chord pulse
+        p.spread(0.4).o1(W_SAW, level=0.7).o2(W_SAW, fine=8, level=0.5).filt(1200, 0.2)
+        p.fenv(0.0, 0.15, 0.1, 0.1, amt=0.3).amp(0.0, 0.2, 0.3, 0.1).chorus(0.25, 0.3, 0.2).verb(0.18, 0.6)
+        tags = ["Chord"]
+    else:                # plucky bleep
+        p.o1(W_SQR, shape=0.25, level=0.75).filt(2200, 0.25).fenv(0.0, 0.1, 0.0, 0.1, amt=0.3)
+        p.amp(0.0, 0.15, 0.1, 0.1).delay("3/16", 0.35, 0.18)
+        tags = ["Bleep"]
+    p.arp(rate=pick(["1/16", "1/16", "1/8"], v), mode=ARP_TRIG if v % 3 != 2 else pick([ARP_UP, ARP_ALT1], v),
+          gate=pick([0.45, 0.6, 0.35], v), octaves=1, tempo=pick([124.0, 128.0, 122.0, 132.0], v),
+          swing=pick([0.0, 0.2, 0.0, 0.35], v), steps=pick(SEQ_STEPS, v))
+    return p, tags
+
+
+# ============================== BRASS / CHOIR
+def br_synth(v, rng):
+    p = Patch().spread(0.3)
+    p.o1(W_SAW, level=0.7).o2(W_SAW, fine=8, level=0.55)
+    p.filt(pick([800, 1100, 650], v), 0.12).fenv(pick([0.04, 0.08, 0.02], v), pick([0.5, 0.8], v), 0.45, 0.3,
+                                                  amt=pick([0.35, 0.28, 0.42], v))
+    p.amp(pick([0.03, 0.06, 0.015], v), 0.5, 0.9, 0.35, vel=0.4).mod(4, S_VEL, D_CUT, 0.15)
+    p.chorus(0.25, 0.3, 0.2).verb(0.18, 0.6)
+    if v % 3 == 2:
+        p.wide(7.0, 0.3)
+    return p, ["Synth Brass"]
+
+
+def ch_vocal(v, rng):
+    p = Patch().spread(0.3)
+    p.o1(W_DIG, digital=dig("vocal", v, v % 2), level=0.85).o2(W_DIG, digital=dig("vocal", v + 2), fine=7, level=0.6)
+    p.filt(pick([3000, 2200, 4000], v), 0.1).amp(pick([0.4, 0.7, 0.25], v), 1.0, 1.0, 1.6, vel=0.2)
+    p.lfo2(L_SIN, 4.8).sh["voice_vib"] = 0.4
+    p.wide(8.0, 0.4).chorus(0.35, 0.45, 0.2).verb(0.35, 0.8, 0.5)
+    return p, ["Vocal"]
+
+
+# ============================== HIT / SFX
+def h_stab(v, rng):
+    p = Patch().spread(pick([0.5, 0.3], v))
+    kind = v % 3
+    if kind == 0:        # rave chord stab: fifth + octave
+        p.o1(W_SAW, level=0.65).o2(W_SAW, pitch=7, level=0.5)
+        tags = ["Rave"]
+    elif kind == 1:      # sus house stab: a fourth or fifth on top
+        p.o1(W_SAW, level=0.65).o2(W_SQR, pitch=pick([5, 7], v), level=0.45)
+        tags = ["House"]
+    else:                # noise-edged hit
+        p.o1(W_SAW, level=0.65).o2(W_SAW, octave=-1, level=0.5).noise(0.15)
+        tags = ["Impact"]
+    p.filt(pick([2200, 3200, 1600], v), 0.2).fenv(0.0, 0.25, 0.0, 0.2, amt=0.35)
+    p.amp(0.0, pick([0.35, 0.5, 0.25], v), 0.0, 0.3, vel=0.3)
+    p.chorus(0.2, 0.3, 0.2).delay("1/8", 0.3, 0.14).verb(0.25, 0.65)
+    if v % 4 == 3:
+        p.drive(0.3, 0.35)
+    return p, ["Stab"] + tags
+
+
+def x_sfx(v, rng):
+    p = Patch()
+    kind = v % 4
+    if kind == 0:        # riser: pitch and filter climb while held
+        p.o1(W_SAW, level=0.6).noise(0.3).filt(400, 0.3, key=0.0)
+        p.fenv(pick([3.0, 4.0], v), 0.5, 1.0, 1.0, amt=0.6).mod(2, S_ENV1, D_PITCH, 0.6)
+        p.amp(1.5, 1.0, 1.0, 1.0).verb(0.3, 0.8)
+        tags = ["Riser"]
+    elif kind == 1:      # zap / laser
+        p.o1(W_SQR, shape=0.3, level=0.75).fenv(0.0, pick([0.12, 0.2], v), 0.0, 0.1)
+        p.mod(2, S_ENV1, D_PITCH, pick([0.9, 0.7], v)).amp(0.0, 0.3, 0.0, 0.2).delay("1/8", 0.35, 0.2)
+        tags = ["Zap"]
+    elif kind == 2:      # noise sweep
+        p.o1(W_NOI, level=0.0).noise(0.7).filt(800, 0.55, kind=F_BP12, key=0.0)
+        p.lfo1(L_TRI, sync=pick(["1/1", "1/2"], v), depth=1.0, key=1).mod(1, S_LFO1, D_CUT, 0.6)
+        p.amp(0.3, 1.0, 1.0, 1.0).verb(0.35, 0.8).delay("1/4", 0.4, 0.2)
+        tags = ["Sweep"]
+    else:                # downlifter
+        # ENV1 falls from full to zero: the pitch starts 6 semitones up and sinks
+        p.o1(W_SAW, octave=-1, level=0.6).o2(W_SAW, octave=-1, fine=12, level=0.5).filt(5000, 0.2, key=0.0)
+        p.fenv(0.0, pick([2.5, 3.5], v), 0.0, 1.0).mod(2, S_ENV1, D_PITCH, 0.5)
+        p.amp(0.0, 3.0, 0.0, 1.0).verb(0.3, 0.8)
+        tags = ["Downlifter"]
+    return p, tags
+
+
+# ---------------------------------------------------------------- bank plan
+# (category, recipe, count, name words) -> 400 presets
+ADJ = {
+    "Bass": ["Deep", "Heavy", "Rubber", "Midnight", "Concrete", "Velvet", "Pressure", "Basement", "Low", "Thick",
+             "Iron", "Smoky", "Tight", "Round", "Warm", "Gritty", "Neon", "Night", "Dusty", "Solid", "Hollow",
+             "Steel", "Liquid", "Shadow", "Bold", "Muddy", "Punchy", "Dark", "Brick", "Underground"],
+    "Lead": ["Bright", "Silver", "Laser", "Soaring", "Golden", "Crystal", "Electric", "Neon", "Prism", "Comet",
+             "Signal", "Vivid", "Wild", "Hyper", "Shiny", "Clear", "Rising", "Polar", "Sonic", "Turbo"],
+    "Pad": ["Endless", "Soft", "Distant", "Floating", "Velvet", "Frozen", "Golden", "Hazy", "Slow", "Wide",
+            "Quiet", "Ocean", "Northern", "Dusk", "Dawn", "Misty", "Silk", "Calm", "Deep", "Faded"],
+    "Pluck": ["Bouncy", "Glassy", "Bright", "Tiny", "Sunny", "Crisp", "Candy", "Soft", "Quick", "Spark",
+              "Wooden", "Pastel", "Lucky", "Fresh", "Happy", "Late"],
+    "Keys": ["Warm", "Vintage", "Mellow", "Smooth", "Sunday", "Lounge", "Gospel", "Late Night", "Basement",
+             "Soulful", "Classic", "Bright", "Dusty", "Dreamy"],
+    "Bell": ["Crystal", "Glass", "Temple", "Silver", "Winter", "Bright", "Distant", "Chime", "Starry", "Clear"],
+    "Arp": ["Running", "Spinning", "Rolling", "Cascading", "Twinkling", "Racing", "Bubbling", "Climbing",
+            "Spiral", "Looping", "Flowing", "Dancing"],
+    "Sequence": ["Groove", "Motion", "Pulse", "Machine", "Engine", "Tracker", "Shuffle", "Step"],
+    "Brass": ["Bold", "Royal", "Brassy", "Bright", "Big", "Wide", "Fat", "Golden"],
+    "Choir": ["Angel", "Ghost", "Distant", "Soft", "Glass", "Cathedral"],
+    "Hit": ["Big", "Sharp", "Hard", "Wide", "Short", "Loud", "Club", "Massive", "Dirty"],
+    "SFX": ["Rocket", "Space", "Static", "Storm", "Orbit", "Signal", "Vapor", "Falling"],
+}
+
+PLAN = [
+    # Bass 84
+    ("Bass", b_808, 10, ["808", "Boom", "Kick Sub", "Trap Sub"]),
+    ("Bass", b_sub, 8, ["Sub", "Sub Line", "Floor"]),
+    ("Bass", b_reese, 10, ["Reese", "Reese Line", "Roller"]),
+    ("Bass", b_growl, 8, ["Growl", "Snarl", "Beast"]),
+    ("Bass", b_wobble, 8, ["Wobble", "Wub", "Wobble Line"]),
+    ("Bass", b_pluck, 10, ["Pluck Bass", "Bounce", "Slap"]),
+    ("Bass", b_house, 8, ["House Bass", "Organ Bass", "Groove Bass"]),
+    ("Bass", b_analog, 10, ["Mono Bass", "Synth Bass", "Drive Bass"]),
+    ("Bass", b_acid, 6, ["Acid", "Squelch", "Acid Line"]),
+    ("Bass", b_fm, 6, ["FM Bass", "Tine Bass", "Knock Bass"]),
+    # Lead 56
+    ("Lead", l_supersaw, 10, ["Supersaw", "Anthem Lead", "Saw Lead"]),
+    ("Lead", l_square, 6, ["Square Lead", "Chip Lead", "Pulse Lead"]),
+    ("Lead", l_sync, 7, ["Sync Lead", "Sync Scream", "Tear Lead"]),
+    ("Lead", l_glide, 8, ["Glide Lead", "Portamento", "Slide Lead"]),
+    ("Lead", l_soft, 6, ["Flute", "Whistle", "Soft Lead"]),
+    ("Lead", l_digital, 7, ["Digital Lead", "Talk Lead", "Formant Lead"]),
+    ("Lead", l_rave, 6, ["Rave Lead", "Hover Lead", "Siren"]),
+    ("Lead", l_pluck, 6, ["Pluck Lead", "Hook", "Riff Lead"]),
+    # Pad 56
+    ("Pad", pd_supersaw, 10, ["Supersaw Pad", "Anthem Pad", "Saw Pad"]),
+    ("Pad", pd_warm, 10, ["Warm Pad", "Analog Pad", "Blanket"]),
+    ("Pad", pd_airy, 8, ["Air Pad", "Breath", "Atmosphere"]),
+    ("Pad", pd_evolving, 8, ["Motion Pad", "Drift", "Tides"]),
+    ("Pad", pd_dark, 8, ["Dark Pad", "Abyss", "Undertow"]),
+    ("Pad", pd_glass, 6, ["Glass Pad", "Crystal Pad", "Shimmer"]),
+    ("Pad", pd_strings, 6, ["Strings", "Synth Strings", "Ensemble"]),
+    # Pluck 40
+    ("Pluck", pl_future, 10, ["Future Pluck", "Chord Pluck", "Drop Pluck"]),
+    ("Pluck", pl_mallet, 8, ["Mallet", "Marimba", "Vibes"]),
+    ("Pluck", pl_deep, 8, ["Deep Pluck", "House Pluck", "Dub Chord"]),
+    ("Pluck", pl_kalimba, 6, ["Kalimba", "Thumb Piano", "Wood Pluck"]),
+    ("Pluck", pl_harp, 8, ["Harp", "Synth Guitar", "Koto Pluck"]),
+    # Keys 32
+    ("Keys", k_ep, 10, ["EP", "Electric Piano", "Tine Keys"]),
+    ("Keys", k_organ, 8, ["Organ", "House Organ", "Drawbar"]),
+    ("Keys", k_stab, 8, ["Chord Keys", "Stab Keys", "Poly Keys"]),
+    ("Keys", k_clav, 6, ["Clav", "Funk Keys", "Pluck Keys"]),
+    # Bell 18
+    ("Bell", bl_fm, 10, ["Bell", "FM Bell", "Chime"]),
+    ("Bell", bl_digital, 8, ["Digital Bell", "Music Box", "Glockenspiel"]),
+    # Arp 34, Sequence 18
+    ("Arp", a_arp, 34, ["Arp", "Arpeggio", "Run"]),
+    ("Sequence", s_seq, 18, ["Sequence", "Loop", "Pattern"]),
+    # Brass 16, Choir 12
+    ("Brass", br_synth, 16, ["Brass", "Synth Brass", "Horns"]),
+    ("Choir", ch_vocal, 12, ["Choir", "Voices", "Aahs"]),
+    # Hit 18, SFX 16
+    ("Hit", h_stab, 18, ["Stab", "Hit", "Chord Stab"]),
+    ("SFX", x_sfx, 16, ["Riser", "Zap", "Sweep", "Downlifter"]),
+]
+
+
+def build():
+    presets = [("Init", ["Init"], init_patch().values())]
+    used = {"Init"}
+    adj_pos = {c: 0 for c in ADJ}
+    for cat, fn, count, nouns in PLAN:
+        for v in range(count):
+            rng = random.Random(f"nanofrog-2026-10-29-{fn.__name__}-{v}")
+            p, tags = fn(v, rng)
+            # name: an adjective from the category list + one of the recipe's nouns
+            for _ in range(400):
+                adj = ADJ[cat][adj_pos[cat] % len(ADJ[cat])]
+                adj_pos[cat] += 1
+                noun = nouns[(v + adj_pos[cat] // len(ADJ[cat])) % len(nouns)]
+                name = f"{adj} {noun}"
+                if name not in used:
                     break
-        if ok:
-            return cand
-        if worst > best_score:
-            best, best_score = cand, worst
-    print(f"  note: {PATCHES[idx][0]!r} kept best of 80 (min distance {best_score:.2f})",
-          file=sys.stderr)
-    return best
+            assert name not in used, name
+            used.add(name)
+            presets.append((name, [cat] + tags, p.values()))
+    return presets
 
 
-def full_t1_probe(t1partial):
-    full = dict(base_timbre())
-    full.update(t1partial)
-    return full
+def init_patch():
+    p = Patch()
+    p.o1(W_SAW, level=0.8).filt(18000, 0.0).amp(0.002, 0.3, 1.0, 0.25, vel=0.0)
+    return p
 
 
 def main():
-    import json as _json
-    import json as _json2
-    salts_file = ROOT / "Tools" / "bank_salts.json"
-    salts = {int(k): v for k, v in _json2.loads(salts_file.read_text()).items()} \
-        if salts_file.exists() else {}
+    import json
+    presets = build()
+    assert len(presets) == 401, len(presets)
+    levels_file = ROOT / "Tools" / "bank_levels.json"
+    levels = {int(k): v for k, v in json.loads(levels_file.read_text()).items()} \
+        if levels_file.exists() else {}
+    oi = KIDS.index("output_level")
     bank = {"type": "NanoFrogBank", "version": 1, "param_count": len(KIDS),
             "param_ids": KIDS, "presets": []}
-    accepted = []
-    for i in range(len(PATCHES)):
-        # Per-slot RNG: re-rolling one slot (salt) never reshuffles the others.
-        salt = salts.get(i, 0)
-        rng = random.Random(f"20261007-{i}-{salt}")
-        name, vals, tags, key = build_one(i, rng, accepted, salt)
-        accepted.append(key)
+    for i, (name, tags, vals) in enumerate(presets):
+        if i in levels:
+            vals[oi] = round(levels[i], 4)
         bank["presets"].append({"name": name, "tags": tags, "values": vals})
-    outdir = ROOT / "FactoryBank"
-    outdir.mkdir(exist_ok=True)
-    (outdir / "NanoFrogFactory.json").write_text(_json.dumps(bank))
-    print(f"wrote {len(PATCHES)} presets", file=sys.stderr)
+    (ROOT / "FactoryBank").mkdir(exist_ok=True)
+    (ROOT / "FactoryBank" / "NanoFrogFactory.json").write_text(json.dumps(bank))
+    print(f"wrote {len(presets)} presets", file=sys.stderr)
 
 
 if __name__ == "__main__":

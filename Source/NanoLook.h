@@ -56,7 +56,7 @@ struct NanoLook : juce::LookAndFeel_V4
         pastel::Theme::comboBg = NanoColors::comboBg; pastel::Theme::text = NanoColors::text;
         pastel::Theme::textDim = NanoColors::dim;    pastel::Theme::faint = juce::Colour (0xff5c5b55);
         pastel::Theme::handle = NanoColors::handle;  pastel::Theme::ink = NanoColors::ink;
-        pastel::Theme::regular = latoReg;            pastel::Theme::bold = latoBold;
+        pastel::ThemeFonts::getInstance()->regular = latoReg;            pastel::ThemeFonts::getInstance()->bold = latoBold;
     }
 
     juce::Font uiFont (float h) const

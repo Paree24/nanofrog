@@ -68,7 +68,7 @@ public:
         active = false; note = -1; velocity = 0; fade = 1.0f;
         stealing = false; pendingNote = -1; stealGain = 0.0f;
         lfo1MulSm = lfo2MulSm = 0.0f; fmPhase = 0.0f;
-        curFreq1 = curFreq2 = 440.0; cutSm = -1.0; ampSm = 0.0; panSmL = panSmR = 0.7f;
+        curFreq1 = curFreq2 = 440.0; hasPitch = false; cutSm = -1.0; ampSm = 0.0; panSmL = panSmR = 0.7f;
         age = 0; randConst = (float) rand() / RAND_MAX * 2.0f - 1.0f;
     }
 
@@ -98,7 +98,10 @@ public:
         if (p.lfo2KeySync == 2) lfo2.keySync (true);
         // freq targets set lazily per-sample; init glide start at current or target
         double t = baseFreq (midiNote, p, true);
-        if (p.portamento <= 0.001f) { curFreq1 = t; curFreq2 = baseFreq (midiNote, p, false); }
+        // glide from the voice's last pitch; a voice that never sounded has none
+        // and starts on its note (not from the 440 Hz placeholder)
+        if (p.portamento <= 0.001f || ! hasPitch) { curFreq1 = t; curFreq2 = baseFreq (midiNote, p, false); }
+        hasPitch = true;
         // sync osc2 to osc1 phase when sync modes enabled
         if (p.oscMod == 2 || p.oscMod == 3)
         {
@@ -448,6 +451,7 @@ private:
     bool stealing = false;
     int pendingNote = -1;
     float pendingVel = 0.0f, stealGain = 0.0f;
+    bool hasPitch = false; // curFreq1/2 hold a played note's pitch (glide start)
     double curFreq1 = 440, curFreq2 = 440, cutSm = -1.0, ampSm = 0; // cutSm: smoothed CUTOFF knob (0..1, -1 = snap)
     float panSmL = 0.7f, panSmR = 0.7f;
     long age = 0;

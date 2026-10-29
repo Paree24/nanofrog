@@ -171,6 +171,14 @@ static int dumpPitch (const char* path)
     return 0;
 }
 
+// first factory preset carrying a tag (the bank is generated: names may change)
+static int firstWithTag (const juce::String& tag)
+{
+    for (int i = 0; i < PresetBank::count(); ++i)
+        if (PresetBank::get (i).tags.contains (tag)) return i;
+    return -1;
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -212,8 +220,8 @@ int main()
     CHECK (PresetBank::get (0).name == "Init",
            "preset 0 is '%s', expected Init",
            PresetBank::get (0).name.toRawUTF8());
-    CHECK (PresetBank::get (1).name == "Init Lead",
-           "preset 1 is '%s', expected Init Lead",
+    CHECK (PresetBank::get (1).tags.contains ("Bass") && PresetBank::get (1).tags.contains ("808"),
+           "preset 1 is '%s', expected the first 808 bass",
            PresetBank::get (1).name.toRawUTF8());
 
     // ---- MIDI learn: global CC map + preset knob (scratch file, not ~/.config) ----
@@ -494,11 +502,11 @@ int main()
     // ---- tags + filter (browser model) ----
     {
         CHECK (! PresetBank::isFallback(), "factory JSON did not load (fallback active)");
-        int growlIdx = PresetBank::findByName ("Tearout Titan");
-        CHECK (growlIdx >= 0, "Tearout Titan missing from bank");
+        int growlIdx = firstWithTag ("Growl");
+        CHECK (growlIdx >= 0, "no Growl preset in the bank");
         if (growlIdx >= 0)
-            CHECK (PresetBank::get (growlIdx).tags.contains ("Growl"),
-                   "Tearout Titan missing Growl tag");
+            CHECK (PresetBank::findByName (PresetBank::get (growlIdx).name) == growlIdx,
+                   "findByName misses %s", PresetBank::get (growlIdx).name.toRawUTF8());
         auto wob = PresetBank::filter ("wobble", "All");
         CHECK (! wob.empty(), "filter 'wobble' empty");
         for (int id : wob)
@@ -1208,8 +1216,8 @@ int main()
         // Bass: envelopes frozen, pitch frozen, something else moves,
         // gated modules stay off
         {
-            int idx = PresetBank::findByName ("Reese Criminal");
-            CHECK (idx >= 0, "Reese Criminal missing");
+            int idx = firstWithTag ("Reese");
+            CHECK (idx >= 0, "no Reese bass in the bank");
             proc->loadFactoryPreset (idx);
             auto envBefore = snapshotEnv();
             auto allBefore = PresetBank::capture (proc->apvts);
@@ -1235,10 +1243,10 @@ int main()
             CHECK (rawOf ("fm_amt") == 0.0f, "mutate woke FM");
             printf ("mutate bass: %d params moved, envelopes frozen\n", diffs);
         }
-        // 808 Menace (silent osc2, no FX, no LFO, no mods): sleepers stay asleep
+        // the first 808 (pure sine: silent osc2, no FX, no LFO, no mods): sleepers stay asleep
         {
-            int idx = PresetBank::findByName ("808 Menace");
-            CHECK (idx >= 0, "808 Menace missing");
+            int idx = firstWithTag ("808");
+            CHECK (idx >= 0, "no 808 in the bank");
             proc->loadFactoryPreset (idx);
             proc->mutateCurrentPatch();
             CHECK (rawOf ("osc2_level") == 0.0f && rawOf ("mix_o2") == 0.0f,
@@ -1257,8 +1265,8 @@ int main()
         }
         // Pad: envelopes free to move, and something does move
         {
-            int idx = PresetBank::findByName ("Polar Glow");
-            CHECK (idx >= 0, "Polar Glow missing");
+            int idx = firstWithTag ("Pad");
+            CHECK (idx >= 0, "no Pad in the bank");
             proc->loadFactoryPreset (idx);
             auto envBefore = snapshotEnv();
             proc->mutateCurrentPatch();
