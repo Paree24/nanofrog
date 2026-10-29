@@ -93,6 +93,14 @@ candidates per slot and keeps, slot by slot, the one that sounds least
 like its siblings (`Tools/bank_choice.json`); names come from the chosen
 options ("Phased Metal Reese", "Sync Brass").
 
+Basses sound at the key's pitch (sub layers on the fundamental or an
+octave under). Reeses are always detuned saws (two, or a four-voice stack)
+with a clean sine sub; growls move inside each note (envelope-swept
+formants, FM ratio, ring, sync and pulse width), unlike wobbles, whose
+filter follows a tempo-synced LFO. `NANOFROG_RENDER_WAV=dir` (optionally
+`NANOFROG_RENDER_MATCH=name`) makes the headless test render presets to WAV
+for auditioning.
+
 Every factory preset is guaranteed in key: no oscillator sits more than 25
 cents from the played note (or its fourth/fifth/octave), counting fine tune,
 Detune spread, unison, ring/FM ratios and vibrato

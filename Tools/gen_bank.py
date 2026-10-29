@@ -515,6 +515,8 @@ def lay_fifth():
 
 def lay_sub():
     def f(p, o, r):
+        if p.t2 is not None:
+            return
         p.layer(r.uniform(0.4, 0.5), osc1_wave=W_SIN, osc1_octave=p.t1["osc1_octave"] - 1, mix_o2=0.0,
                 osc2_level=0.0, filter_cutoff=cut(400), filter_reso=0.0, mod1_amt=0.0, amp_pan=0.0)
     return Opt(None, f, ["Layer", "Sub"])
@@ -561,7 +563,11 @@ def mv_steps(amt=(0.2, 0.35)):
 
 def mv_morph():
     def f(p, o, r):
-        p.lfo1(L_TRI, hz=r.uniform(0.2, 0.8), depth=1.0, key=0).mod(1, S_LFO1, D_O1SHAPE, r.uniform(0.4, 0.8))
+        p.lfo1(L_TRI, hz=r.uniform(0.2, 0.8), depth=1.0, key=0)
+        if p.t1["osc1_wave"] in (W_DIG, W_NOI):   # digital waves ignore the shape control
+            p.mod(1, S_LFO1, D_CUT, r.uniform(0.12, 0.2))
+            return "Drifting"
+        p.mod(1, S_LFO1, D_O1SHAPE, r.uniform(0.4, 0.8))
     return Opt("Morphing", f, ["Moving"])
 
 
@@ -639,8 +645,9 @@ def fx_phase_drive():
 
 # ---------------------------------------------------------------- archetypes
 class Arch:
-    def __init__(self, cat, noun, count, tags, core, axes, first=None, words=None, boost=1.0):
+    def __init__(self, cat, noun, count, tags, core, axes, first=None, words=None, boost=1.0, cycle=None):
         self.cat, self.noun, self.count, self.tags, self.boost = cat, noun, count, tags, boost
+        self.cycle = cycle   # an axis whose options are used in turn (slot v -> option v % n)
         self.core, self.axes, self.first = core, axes, first
         self.words = words or ["source", "layer", "motion", "fx", "filter"]
 
@@ -655,7 +662,7 @@ def core_bass(mono=True, glide=0.0, legato=True):
 
 def core_808(p, r):
     p.mono(glide=r.choice([0.0, 0.0, 0.12]), legato=True)
-    p.o1(W_SIN, octave=-1, level=0.95).filt(2400, key=0.0)
+    p.o1(W_SIN, octave=0, level=0.95).filt(2400, key=0.0)
     p.amp(0.0, r.choice([0.6, 0.8, 1.1, 1.5]), 0.0, r.choice([0.12, 0.2]), vel=0.15)
 
 
@@ -667,14 +674,14 @@ def src_808_click():
 
 def src_808_tri():
     def f(p, o, r):
-        p.o1(W_TRI, octave=-1, level=0.95)
+        p.o1(W_TRI, octave=0, level=0.95)
         p.fenv(0.0, 0.05, 0.0, 0.1).mod(2, S_ENV1, D_PITCH, r.uniform(0.05, 0.1))
     return Opt("Knock", f, [])
 
 
 def src_808_square():
     def f(p, o, r):
-        p.o2(W_SQR, octave=-1, level=0.18).filt(r.uniform(500, 900), 0.1, key=0.0)
+        p.o2(W_SQR, octave=0, level=0.18).filt(r.uniform(500, 900), 0.1, key=0.0)
     return Opt("Edge", f, [])
 
 
@@ -684,6 +691,131 @@ def src_808_pure():
 
 def first_808_clean(p, r):
     """the first 808: pure sine, no FX, no LFO, no mods (the self-test checks MUTATE keeps it asleep)"""
+
+
+def reese_stack(cents, word, uni=0.0, pulse=False):
+    """Two saws detuned +-cents/2 (slow phasing .. rough beating); uni > 0 stacks
+    four voices of them, spread over `uni` cents."""
+    def f(p, o, r):
+        d = cents * r.uniform(0.85, 1.15) / 2.0
+        p.o1(W_SAW, octave=o, fine=-d, level=0.72)
+        if pulse:
+            p.o2(W_SQR, octave=o, fine=d, shape=r.uniform(0.25, 0.4), level=0.62)
+        else:
+            p.o2(W_SAW, octave=o, fine=d, level=0.68)
+        if uni:
+            p.unison(uni)
+    return Opt(word, f, ["Saw"] + (["Unison"] if uni else []))
+
+
+def reese_sub():
+    def f(p, o, r):
+        if p.t2 is not None:
+            return
+        # timbre 2: a clean sine on the fundamental, so the low end stays solid while the saws beat
+        p.layer(r.uniform(0.38, 0.46), osc1_wave=W_SIN, osc1_octave=p.t1["osc1_octave"], osc1_fine=0.0,
+                mix_o1=0.9, mix_o2=0.0, osc2_level=0.0, filter_type=F_LP24, filter_cutoff=cut(300), filter_reso=0.0,
+                filter_envamt=0.0, mod1_amt=0.0, amp_pan=0.0)
+        # one centred voice, even when timbre 1 is a unison stack
+        p.sh.update(t2_voice_assign=1, t2_voice_poly=1, t2_voice_detune=0.0, t2_voice_unidet=0.0)
+    return Opt(None, f, ["Sub"])
+
+
+def reese_octave():
+    def f(p, o, r):
+        if p.t2 is not None:
+            return
+        p.layer(r.uniform(0.38, 0.46), osc1_octave=p.t1["osc1_octave"] - 1, osc2_octave=p.t1["osc2_octave"] - 1,
+                filter_cutoff=cut(400), filter_reso=0.1, amp_pan=0.0)
+    return Opt("Deep", f, ["Layer"])
+
+
+# growls: the vowel-like movement is shaped per note by ENV1 (up and back,
+# opening, ratio / sync / ring sweeps, wave morph). No steady LFO sweep:
+# that would be a wobble. LFO1 only adds fast random grit; the mod wheel
+# opens the tone for performance.
+def _grit(p, r, amt=(0.04, 0.08)):
+    p.lfo1(L_RND, hz=r.uniform(14.0, 22.0), depth=1.0, key=2).mod(1, S_LFO1, D_CUT, r.uniform(*amt))
+
+
+def growl_yoy(p, o, r):
+    # a resonant band-pass swept up and back down by ENV1: "yoy"
+    p.o1(W_SAW, octave=o, fine=-6, level=0.75).o2(W_SQR, octave=o, fine=6, shape=0.3, level=0.6)
+    p.filt(r.uniform(300, 420), r.uniform(0.6, 0.72), kind=F_BP12, key=0.4)
+    p.fenv(r.uniform(0.08, 0.14), r.uniform(0.25, 0.35), 0.15, 0.15, amt=r.uniform(0.3, 0.38))
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_CUT, 0.3)
+
+
+def growl_wow(p, o, r):
+    # a low-pass with heavy resonance opening slowly: "wow"
+    p.o1(W_SAW, octave=o, level=0.75).o2(W_SAW, octave=o, fine=9, level=0.65)
+    p.filt(r.uniform(150, 220), r.uniform(0.6, 0.7), kind=F_LP24, key=0.4)
+    p.fenv(r.uniform(0.18, 0.3), 0.6, 0.6, 0.2, amt=r.uniform(0.35, 0.45))
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_CUT, 0.3)
+
+
+def growl_fm(p, o, r):
+    # FM whose ratio is swept by ENV1, settling back on the octave: metallic vowels
+    p.o1(W_SAW, octave=o, level=0.8).o2(W_SIN, octave=o + 1, level=0.0)
+    p.t1["osc2_level"] = 1.0
+    p.t1["fm_amt"] = r.uniform(0.35, 0.5)
+    p.fenv(r.uniform(0.04, 0.08), r.uniform(0.35, 0.5), 0.0, 0.2, amt=0.3).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.6, 0.9))
+    p.filt(r.uniform(450, 700), 0.45, kind=F_LP24)
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_O2PITCH, 0.25)
+
+
+def growl_ring(p, o, r):
+    # ring mod against a square whose pitch dives with ENV1: grinding metal
+    p.o1(W_SAW, octave=o, level=0.7).o2(W_SQR, octave=o + 1, level=0.6)
+    p.t1["osc_mod"] = 1
+    p.fenv(0.0, r.uniform(0.35, 0.55), 0.0, 0.2).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.3, 0.5))
+    p.filt(r.uniform(900, 1400), 0.45, kind=F_LP12)
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_O2PITCH, 0.2)
+
+
+def growl_sync(p, o, r):
+    # hard sync swept by ENV1: a screaming tear that settles
+    p.o1(W_SAW, octave=o, level=0.4).o2(W_SAW, octave=o, pitch=12, level=0.8)
+    p.t1["osc_mod"] = 2
+    p.fenv(r.uniform(0.04, 0.08), r.uniform(0.35, 0.5), 0.15, 0.2, amt=0.28).mod(2, S_ENV1, D_O2PITCH, r.uniform(0.65, 0.9))
+    p.filt(r.uniform(600, 900), 0.35, kind=F_LP24)
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_O2PITCH, 0.3)
+
+
+def growl_morph(p, o, r):
+    # a pulse whose width ENV1 sweeps thin -> square, through a band-pass: "nyow"
+    # (on digital waves the shape control does nothing, so this is a pulse)
+    p.o1(W_SQR, octave=o, shape=0.05, level=0.8).o2(W_SAW, octave=o, fine=7, level=0.45)
+    p.fenv(r.uniform(0.06, 0.12), 0.45, 0.25, 0.2, amt=0.22).mod(2, S_ENV1, D_O1SHAPE, -0.9)
+    p.t1["osc1_shape"] = 0.9
+    p.filt(r.uniform(500, 800), 0.5, kind=F_BP12, key=0.4)
+    _grit(p, r)
+    p.mod(4, S_WHEEL, D_O1SHAPE, -0.4)
+
+
+def growl_talking(p, o, r):
+    # two band-passes (a low and a high formant) swept together by ENV1: speech-like
+    p.o1(W_SAW, octave=o, level=0.75).o2(W_SQR, octave=o, fine=5, shape=0.25, level=0.6)
+    p.filt(r.uniform(350, 450), 0.6, kind=F_BP12, key=0.3)
+    p.fenv(r.uniform(0.06, 0.12), 0.4, 0.2, 0.2, amt=r.uniform(0.22, 0.3))
+    p.layer(0.5, filter_cutoff=cut(r.uniform(1100, 1500)), filter_reso=0.6, amp_pan=0.0)
+    p.mod(4, S_WHEEL, D_CUT, 0.25)
+
+
+def growl_snarl(p, o, r):
+    # noisy FM with a resonance sweep: a snarling, breathy growl
+    p.o1(W_SAW, octave=o, level=0.75).o2(W_SIN, octave=o, level=0.0).noise(r.uniform(0.08, 0.14))
+    p.t1["osc2_level"] = 1.0
+    p.t1["fm_amt"] = r.uniform(0.25, 0.35)
+    p.filt(r.uniform(500, 700), 0.55, kind=F_LP24).fenv(0.02, 0.3, 0.3, 0.2, amt=0.3)
+    p.mod(3, S_ENV1, D_RESO, 0.4)
+    _grit(p, r, (0.08, 0.12))
+    p.mod(4, S_WHEEL, D_CUT, 0.3)
 
 
 ARCHES = [
@@ -703,23 +835,24 @@ ARCHES = [
         "fx": [fx_dry(), fx_tape(), fx_tube()],
     }),
     Arch("Bass", "Reese", 14, ["Reese"], core_bass(glide=0.0), {
-        "source": [src_saws((9, 20)), src_saw_pulse(), src_squares(), src_pwm(), src_digital("detune"),
-                   src_digital("analog"), src_digital("metal"), src_digital("bright"), src_hybrid(),
-                   src_sync((0.1, 0.25)), src_ring()],
-        "filter": [flt(None, F_LP24, 800, 0.15, env=0.12, dec=0.4, sus=0.6), flt("Hollow", F_BP12, 900, 0.35),
-                   flt("Dark", F_LP24, 450, 0.25), flt("Open", F_LP12, 2200, 0.1), flt("Nasal", F_LP24, 1100, 0.45)],
-        "layer": [lay_none(), lay_none(), lay_sub(), lay_octave(True), lay_texture(), lay_split()],
-        "motion": [mv_still(), mv_drift(), mv_drift((0.15, 0.3)), mv_morph(), mv_pan(), mv_synced(("1/4", "1/2", "1/8"), (0.15, 0.3))],
-        "fx": [fx_dry(), fx_phaser(), fx_flanger(), fx_drive(), fx_tape(), fx_phase_drive(), fx_chorus()],
-    }, first={"source": 0, "fx": 0, "motion": 0, "layer": 0}),
+        # always detuned saws: the stack decides how they beat against each other
+        "stack": [reese_stack(7, "Slow"), reese_stack(13, None), reese_stack(22, "Rough"),
+                  reese_stack(10, "Massive", uni=14), reese_stack(16, "Thick", uni=24), reese_stack(12, "Pulse", pulse=True)],
+        "filter": [flt(None, F_LP24, 900, 0.2, env=0.1, dec=0.5, sus=0.7), flt("Dark", F_LP24, 550, 0.25, env=0.08, dec=0.6, sus=0.7),
+                   flt("Open", F_LP12, 2200, 0.1), flt("Nasal", F_LP24, 1200, 0.45, env=0.1, dec=0.4, sus=0.6)],
+        "weight": [reese_sub(), reese_sub(), lay_none()],
+        "motion": [mv_still(), mv_still(), mv_drift((0.06, 0.12)), mv_wheel()],
+        "fx": [fx_tape(), fx_drive(), fx_tube(), fx_phaser(), fx_flanger(), fx_phase_drive(), fx_chorus(), fx_dry()],
+    }, first={"stack": 1, "fx": 7, "motion": 0, "weight": 2}, words=["stack", "filter", "fx", "weight", "motion"]),
     Arch("Bass", "Growl", 8, ["Growl", "Distorted"], core_bass(glide=0.05), {
-        "source": [src_fm((0.2, 0.4)), src_digital("metal"), src_digital("vocal"), src_sync((0.3, 0.6)),
-                   src_ring(), src_hybrid()],
-        "filter": [flt(None, F_LP24, 900, 0.4), flt("Vowel", F_BP12, 1100, 0.5), flt("Snarl", F_LP12, 1500, 0.55)],
-        "motion": [mv_synced(("1/8", "1/16", "1/12"), (0.4, 0.65)), mv_morph(), mv_steps((0.3, 0.45))],
-        "layer": [lay_none(), lay_sub(), lay_split()],
-        "fx": [fx_drive(), fx_phase_drive(), Opt("Crushed", lambda p, o, r: (p.drive(0.6, 0.7), p.sat(0.4, 0.5)), ["Distorted"])],
-    }),
+        # one hand-built growl per slot: the movement lives inside each note
+        "design": [Opt("Yoy", growl_yoy), Opt("Wow", growl_wow), Opt("FM", growl_fm), Opt("Ring", growl_ring),
+                   Opt("Sync", growl_sync), Opt("Morph", growl_morph), Opt("Talking", growl_talking), Opt("Snarl", growl_snarl)],
+        "grit": [Opt(None, lambda p, o, r: p.drive(r.uniform(0.5, 0.65), r.uniform(0.55, 0.7))),
+                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.45, 0.6), 0.6), p.sat(0.35, 0.5))),
+                 Opt(None, lambda p, o, r: (p.drive(r.uniform(0.55, 0.7), 0.65), p.chorus(0.25, 0.45, 0.12, kind=3)))],
+        "weight": [reese_sub(), lay_none()],
+    }, cycle="design", words=["design"]),
     Arch("Bass", "Wobble", 8, ["Wobble"], core_bass(glide=0.06), {
         "source": [src_saws((4, 8)), src_saw_pulse(), src_squares(), src_digital("analog"), src_fm((0.1, 0.2))],
         "filter": [flt(None, F_LP24, 200, 0.4, key=0.3), flt("Talking", F_BP12, 400, 0.5, key=0.3), flt("Rubber", F_LP12, 250, 0.55, key=0.3)],
@@ -738,7 +871,7 @@ ARCHES = [
         "fx": [fx_dry(), fx_tape(), fx_tube(), fx_chorus(), fx_delay()],
     }),
     Arch("Bass", "Groove Bass", 8, ["House"], lambda p, r: (p.mono(t2=False), p.amp(0.0, r.choice([0.35, 0.5]), r.choice([0.0, 0.3]), 0.1, vel=0.35)), {
-        "source": [Opt("Organ", lambda p, o, r: (p.o1(W_SIN, octave=-1, level=0.85), p.o2(W_SQR, octave=0, level=0.3)), ["Organ"]),
+        "source": [Opt("Organ", lambda p, o, r: (p.o1(W_SIN, octave=0, level=0.85), p.o2(W_SQR, octave=1, level=0.3)), ["Organ"]),
                    src_squares(), src_digital("reed"), src_sine_tri(), src_fm((0.1, 0.2))],
         "filter": [flt(None, F_LP24, 1400, 0.0), flt("Rubbery", F_LP24, 400, 0.3, env=0.35, dec=0.15), flt("Muted", F_LP12, 700, 0.1)],
         "fx": [fx_dry(), fx_tape(), fx_chorus()],
@@ -753,8 +886,8 @@ ARCHES = [
     }),
     Arch("Bass", "Acid", 6, ["Acid", "Glide"], lambda p, r: (p.mono(glide=r.choice([0.08, 0.1]), legato=True),
                                                             p.amp(0.0, 0.3, 0.85, 0.08, vel=0.2), p.mod(4, S_VEL, D_CUT, 0.2)), {
-        "source": [Opt(None, lambda p, o, r: p.o1(W_SAW, octave=-1, level=0.85)), Opt("Square", lambda p, o, r: p.o1(W_SQR, octave=-1, level=0.85), ["Square"]),
-                   Opt("Digital", lambda p, o, r: p.o1(W_DIG, octave=-1, digital=dig("analog", r.randrange(8)), level=0.85), ["Digital"])],
+        "source": [Opt(None, lambda p, o, r: p.o1(W_SAW, octave=0, level=0.85)), Opt("Square", lambda p, o, r: p.o1(W_SQR, octave=0, level=0.85), ["Square"]),
+                   Opt("Digital", lambda p, o, r: p.o1(W_DIG, octave=0, digital=dig("analog", r.randrange(8)), level=0.85), ["Digital"])],
         "filter": [flt(None, F_LP24, 260, 0.72, env=0.5, dec=0.18, key=0.35), flt("Screaming", F_LP24, 320, 0.82, env=0.55, dec=0.14, key=0.35),
                    flt("Rubber", F_LP12, 240, 0.7, env=0.45, dec=0.25, key=0.35)],
         "fx": [fx_drive(), fx_delay(), fx_dry(), fx_phase_drive()],
@@ -1092,8 +1225,8 @@ def sfx_design(p, kind, r):
 
 
 # ---------------------------------------------------------------- assembly
-AXIS_ORDER = ["design", "source", "filter", "pattern", "motion", "layer", "fx"]
-BASE_OCT = {"Bass": -1, "Lead": 0, "Pad": 0, "Pluck": 0, "Keys": 0, "Bell": 0, "Arp": 0, "Sequence": 0,
+AXIS_ORDER = ["design", "stack", "source", "filter", "pattern", "motion", "layer", "weight", "grit", "fx"]
+BASE_OCT = {"Bass": 0, "Lead": 0, "Pad": 0, "Pluck": 0, "Keys": 0, "Bell": 0, "Arp": 0, "Sequence": 0,
             "Brass": 0, "Choir": 0, "Hit": 0, "SFX": 0}
 
 
@@ -1104,6 +1237,8 @@ def make_candidate(arch, v, k):
     for ax, opts in arch.axes.items():
         if v == 0 and arch.first and ax in arch.first:
             choice[ax] = arch.first[ax]
+        elif ax == arch.cycle:
+            choice[ax] = v % len(opts)
         else:
             choice[ax] = r.randrange(len(opts))
     p = Patch()
@@ -1115,12 +1250,15 @@ def make_candidate(arch, v, k):
             continue
         opt = arch.axes[ax][choice[ax]]
         res = opt.fn(p, o, r)
+        word = opt.word
         if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], str):
             own, extra = res
             tags += extra
+        elif isinstance(res, str):
+            word = res          # the option did something else here: name that
         tags += opt.tags
-        if opt.word and ax in arch.words:
-            words.append(opt.word)
+        if word and ax in arch.words:
+            words.append(word)
     # quiet sources (sparse digital waves): more level into the mixer
     for t in (p.t1, p.t2):
         if t is not None and arch.boost != 1.0:

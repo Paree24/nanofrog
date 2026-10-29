@@ -180,11 +180,52 @@ static int firstWithTag (const juce::String& tag)
     return -1;
 }
 
+// ---- WAV render (NANOFROG_RENDER_WAV=dir, NANOFROG_RENDER_MATCH=name part):
+// every matching factory preset plays one note (C2 for Bass, else C4) held
+// 1.5 s + 0.5 s release, written as <dir>/<index> <name>.wav (24-bit stereo).
+static int renderWavs (const char* dir, const char* match)
+{
+    juce::File out (dir);
+    out.createDirectory();
+    juce::WavAudioFormat wav;
+    int n = PresetBank::count(), written = 0;
+    for (int idx = 0; idx < n; ++idx)
+    {
+        const auto& pr = PresetBank::get (idx);
+        if (match != nullptr && ! pr.name.containsIgnoreCase (match)) continue;
+        srand (1);
+        auto px = std::make_unique<NanoFrogProcessor>();
+        px->prepareToPlay (44100.0, 512);
+        px->loadFactoryPreset (idx);
+        const int note = pr.tags.contains ("Bass") ? 36 : 60;
+        const int bs = 512, total = 44100 * 2, off = 44100 * 3 / 2;
+        juce::AudioBuffer<float> all (2, total), buf (2, bs);
+        for (int pos = 0; pos < total; pos += bs)
+        {
+            juce::MidiBuffer m;
+            if (pos == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), 0);
+            if (pos <= off && off < pos + bs) m.addEvent (juce::MidiMessage::noteOff (1, note), off - pos);
+            buf.clear();
+            px->processBlock (buf, m);
+            const int c = juce::jmin (bs, total - pos);
+            for (int ch = 0; ch < 2; ++ch) all.copyFrom (ch, pos, buf, ch, 0, c);
+        }
+        auto f = out.getChildFile (juce::String (idx).paddedLeft ('0', 3) + " " + juce::File::createLegalFileName (pr.name) + ".wav");
+        f.deleteFile();
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), 44100.0, 2, 24, {}, 0));
+        if (w != nullptr) { w->writeFromAudioSampleBuffer (all, 0, total); ++written; }
+    }
+    printf ("rendered %d presets -> %s\n", written, dir);
+    return 0;
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
     setvbuf (stdout, nullptr, _IONBF, 0); // unbuffered: CI logs survive crashes
     printf ("-- NanoFrog headless test --\n");
+    if (const char* dir = std::getenv ("NANOFROG_RENDER_WAV"))
+        return renderWavs (dir, std::getenv ("NANOFROG_RENDER_MATCH"));
     if (const char* dump = std::getenv ("NANOFROG_DUMP_FEATURES"))
         return dumpFeatures (dump); // bank from NANOFROG_FACTORY_JSON as given
     if (const char* dump = std::getenv ("NANOFROG_DUMP_PITCH"))
